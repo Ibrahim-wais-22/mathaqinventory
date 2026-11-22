@@ -1,10 +1,11 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   BarChart3,
   Calendar,
   CheckSquare,
   ChefHat,
   Factory,
+  History,
   LayoutDashboard,
   LogOut,
   Package,
@@ -22,6 +23,7 @@ import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { BrandLogo } from '../../components/common/BrandLogo';
 import { OfflineIndicator } from '../../components/common/OfflineIndicator';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
+import { RecentActivityDrawer } from '../../components/common/RecentActivityDrawer';
 import type { NavTabId } from '../../modules/inventory/ExecutiveDashboard';
 
 interface NavItem {
@@ -44,6 +46,7 @@ export const AppShell: React.FC<{
     currentSession,
     logout,
   } = useFirebase();
+  const [activityOpen, setActivityOpen] = useState(false);
 
   const navItems: NavItem[] = useMemo(() => {
     if (!account) return [];
@@ -127,6 +130,19 @@ export const AppShell: React.FC<{
 
             <PWAInstallButton />
 
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setActivityOpen(true)}
+                className="min-h-[36px] inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-2.5 sm:px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                aria-label="آخر العمليات والتعديلات"
+                title="آخر العمليات والتعديلات"
+              >
+                <History className="h-4 w-4 text-[#D91B23] shrink-0" />
+                <span className="hidden md:inline">آخر العمليات</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => void logout()}
@@ -175,6 +191,14 @@ export const AppShell: React.FC<{
       </main>
 
       <OfflineIndicator />
+
+      {isAdmin && (
+        <RecentActivityDrawer
+          open={activityOpen}
+          onClose={() => setActivityOpen(false)}
+          onOpenFullAudit={() => onSelectTab('approvals')}
+        />
+      )}
     </div>
   );
 };

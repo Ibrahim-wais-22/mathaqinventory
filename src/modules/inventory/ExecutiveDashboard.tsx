@@ -35,7 +35,6 @@ import {
 } from '../../services/inventory/firestoreService';
 import type {
   ApprovalRequest,
-  AuditLog,
   DailySession,
   DepartmentReport,
   FactoryTransfer,
@@ -43,7 +42,7 @@ import type {
 } from '../../types/inventory';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { StatusBadge } from '../../components/common/StatusBadge';
-import { formatArabicDate, formatTimestampAden } from '../../utils/dateAden';
+import { formatArabicDate } from '../../utils/dateAden';
 
 export type NavTabId =
   | 'dashboard'
@@ -67,7 +66,6 @@ export const ExecutiveDashboard: React.FC<{
   const [results, setResults] = useState<ProductResult[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
   const [recentSessions, setRecentSessions] = useState<DailySession[]>([]);
-  const [recentLogs, setRecentLogs] = useState<AuditLog[]>([]);
 
   const [calculating, setCalculating] = useState(false);
   const [closeModalOpen, setCloseModalOpen] = useState(false);
@@ -129,21 +127,12 @@ export const ExecutiveDashboard: React.FC<{
       (err) => handleFirestoreError(err, OperationType.LIST, 'dailySessions')
     );
 
-    const unsubLogs = onSnapshot(
-      query(collection(db, 'auditLogs'), orderBy('createdAt', 'desc'), limit(8)),
-      (snap) => {
-        setRecentLogs(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<AuditLog, 'id'>) })));
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'auditLogs')
-    );
-
     return () => {
       unsubRep();
       unsubTrf();
       unsubRes();
       unsubApp();
       unsubSess();
-      unsubLogs();
     };
   }, [currentSession?.id]);
 
@@ -398,8 +387,8 @@ export const ExecutiveDashboard: React.FC<{
         ))}
       </div>
 
-      {/* Department Reports Status + Pending Approvals + Open/Closed Sessions */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      {/* Department Reports Status + Variance (Shortage & Surplus) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-5 bg-white border border-zinc-200 rounded-2xl overflow-hidden">
           <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
             <h3 className="text-base font-bold text-zinc-900 font-display">حالة تقارير الإدارات</h3>
@@ -443,85 +432,6 @@ export const ExecutiveDashboard: React.FC<{
           </div>
         </div>
 
-        {/* Pending Approvals & Sessions */}
-        <div className="lg:col-span-7 grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="bg-white border border-zinc-200 rounded-2xl overflow-hidden flex flex-col justify-between">
-            <div>
-              <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
-                <h3 className="text-base font-bold text-zinc-900 font-display">
-                  الاعتمادات المعلقة
-                </h3>
-                <span className="text-sm font-extrabold text-[#D91B23] tabular-nums">
-                  {pendingApprovals.length}
-                </span>
-              </div>
-              {pendingApprovals.length === 0 ? (
-                <div className="p-6 text-center text-xs text-zinc-500">
-                  لا توجد طلبات اعتماد أو تصحيح معلقة.
-                </div>
-              ) : (
-                <div className="divide-y divide-zinc-100">
-                  {pendingApprovals.slice(0, 4).map((app) => (
-                    <div key={app.id} className="px-5 py-3">
-                      <div className="text-xs font-bold text-zinc-900 truncate">{app.reason}</div>
-                      <div className="text-[11px] text-zinc-500">
-                        مقدم الطلب: {app.requestedByName}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div className="p-4 border-t border-zinc-100 bg-zinc-50/50">
-              <button
-                type="button"
-                onClick={() => onNavigate('approvals')}
-                className="w-full min-h-[38px] rounded-xl border border-zinc-200 bg-white text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer"
-              >
-                فتح مركز الاعتمادات والتصحيحات
-              </button>
-            </div>
-          </div>
-
-          <div className="bg-white border border-zinc-200 rounded-2xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
-              <h3 className="text-base font-bold text-zinc-900 font-display">
-                الأيام المفتوحة والمغلقة
-              </h3>
-              <CalendarCheck className="h-4 w-4 text-zinc-400" />
-            </div>
-            <div className="divide-y divide-zinc-100">
-              {recentSessions.map((sess) => (
-                <button
-                  key={sess.id}
-                  type="button"
-                  onClick={() => setInventoryDate(sess.inventoryDate)}
-                  className={`w-full px-5 py-3 flex items-center justify-between hover:bg-zinc-50 cursor-pointer ${
-                    sess.inventoryDate === inventoryDate ? 'bg-red-50/40' : ''
-                  }`}
-                >
-                  <span className="font-mono text-xs font-bold text-zinc-800">
-                    {sess.inventoryDate}
-                  </span>
-                  <StatusBadge
-                    label={SESSION_STATUS_LABELS[sess.status]}
-                    tone={
-                      sess.status === 'closed'
-                        ? 'neutral'
-                        : sess.status === 'reopened'
-                        ? 'warning'
-                        : 'success'
-                    }
-                  />
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Variance & Delivery Discrepancies */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <div className="lg:col-span-7 bg-white border border-zinc-200 rounded-2xl overflow-hidden">
           <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -577,9 +487,12 @@ export const ExecutiveDashboard: React.FC<{
             </div>
           )}
         </div>
+      </div>
 
+      {/* Delivery Variances + Pending Approvals + Open/Closed Sessions */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-6">
         {/* Factory vs Production Delivery Variances */}
-        <div className="lg:col-span-5 bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+        <div className="lg:col-span-4 bg-white border border-zinc-200 rounded-2xl overflow-hidden">
           <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
             <h3 className="text-base font-bold text-zinc-900 font-display">
               فروقات تسليم المعمل والإنتاج ({deliveryVarianceTransfers.length})
@@ -616,36 +529,80 @@ export const ExecutiveDashboard: React.FC<{
             </div>
           )}
         </div>
-      </div>
 
-      {/* Recent Audit Logs */}
-      <div className="bg-white border border-zinc-200 rounded-2xl overflow-hidden">
-        <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
-          <h3 className="text-base font-bold text-zinc-900 font-display">آخر العمليات والتعديلات</h3>
-          <button
-            type="button"
-            onClick={() => onNavigate('approvals')}
-            className="text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer"
-          >
-            سجل التدقيق الكامل
-          </button>
-        </div>
-        <div className="divide-y divide-zinc-100">
-          {recentLogs.map((log) => (
-            <div
-              key={log.id}
-              className="px-5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
-            >
-              <div>
-                <span className="font-bold text-zinc-900">{log.actorName}</span> ·{' '}
-                <span className="font-semibold text-[#D91B23]">{log.action.replace(/_/g, ' ')}</span>
-                {log.newValueSummary ? ` · ${log.newValueSummary}` : ''}
-              </div>
-              <span className="text-zinc-400 tabular-nums shrink-0">
-                {formatTimestampAden(log.createdAt)}
+        {/* Pending Approvals */}
+        <div className="lg:col-span-4 bg-white border border-zinc-200 rounded-2xl overflow-hidden flex flex-col justify-between">
+          <div>
+            <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
+              <h3 className="text-base font-bold text-zinc-900 font-display">
+                الاعتمادات المعلقة
+              </h3>
+              <span className="text-sm font-extrabold text-[#D91B23] tabular-nums">
+                {pendingApprovals.length}
               </span>
             </div>
-          ))}
+            {pendingApprovals.length === 0 ? (
+              <div className="p-6 text-center text-xs text-zinc-500">
+                لا توجد طلبات اعتماد أو تصحيح معلقة.
+              </div>
+            ) : (
+              <div className="divide-y divide-zinc-100">
+                {pendingApprovals.slice(0, 4).map((app) => (
+                  <div key={app.id} className="px-5 py-3">
+                    <div className="text-xs font-bold text-zinc-900 truncate">{app.reason}</div>
+                    <div className="text-[11px] text-zinc-500">
+                      مقدم الطلب: {app.requestedByName}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="p-4 border-t border-zinc-100 bg-zinc-50/50">
+            <button
+              type="button"
+              onClick={() => onNavigate('approvals')}
+              className="w-full min-h-[38px] rounded-xl border border-zinc-200 bg-white text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+            >
+              فتح مركز الاعتمادات والتصحيحات
+            </button>
+          </div>
+        </div>
+
+        {/* Open/Closed Sessions */}
+        <div className="lg:col-span-4 bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
+            <h3 className="text-base font-bold text-zinc-900 font-display">
+              الأيام المفتوحة والمغلقة
+            </h3>
+            <CalendarCheck className="h-4 w-4 text-zinc-400" />
+          </div>
+          <div className="divide-y divide-zinc-100">
+            {recentSessions.map((sess) => (
+              <button
+                key={sess.id}
+                type="button"
+                onClick={() => setInventoryDate(sess.inventoryDate)}
+                className={`w-full px-5 py-3 flex items-center justify-between hover:bg-zinc-50 cursor-pointer ${
+                  sess.inventoryDate === inventoryDate ? 'bg-red-50/40' : ''
+                }`}
+              >
+                <span className="font-mono text-xs font-bold text-zinc-800">
+                  {sess.inventoryDate}
+                </span>
+                <StatusBadge
+                  label={SESSION_STATUS_LABELS[sess.status]}
+                  tone={
+                    sess.status === 'closed'
+                      ? 'neutral'
+                      : sess.status === 'reopened'
+                      ? 'warning'
+                      : 'success'
+                  }
+                />
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
