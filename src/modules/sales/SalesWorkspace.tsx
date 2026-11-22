@@ -6,7 +6,7 @@ import {
   query,
   where,
 } from 'firebase/firestore';
-import { Edit3, Save, Search, Send } from 'lucide-react';
+import { Edit3, RefreshCw, Save, Search, Send } from 'lucide-react';
 import { REPORT_STATUS_LABELS, VARIANCE_LABELS } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { OperationType, db, handleFirestoreError } from '../../services/firebase/config';
@@ -27,7 +27,16 @@ import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { StatusBadge } from '../../components/common/StatusBadge';
 
 export const SalesWorkspace: React.FC = () => {
-  const { account, currentSession, categories, products, hasPermission } = useFirebase();
+  const {
+    account,
+    currentSession,
+    sessionLoading,
+    sessionError,
+    refreshSession,
+    categories,
+    products,
+    hasPermission,
+  } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
   const [salesMap, setSalesMap] = useState<Record<string, string>>({});
@@ -59,6 +68,8 @@ export const SalesWorkspace: React.FC = () => {
   const categoryMap = useMemo(() => new Map(categories.map((c) => [c.id, c.name])), [categories]);
 
   useEffect(() => {
+    setReport(null);
+    setSalesMap({});
     if (!account || !currentSession) return;
     let active = true;
     ensureDepartmentReport(account, currentSession, 'sales')
@@ -129,17 +140,30 @@ export const SalesWorkspace: React.FC = () => {
     });
   }, [approvedProducts, selectedCategory, searchQuery]);
 
-  const enteredCount = Object.values(salesMap).filter((v) => v !== '' && v !== undefined).length;
+  const enteredCount = approvedProducts.filter(
+    (p) => salesMap[p.id] !== '' && salesMap[p.id] !== undefined
+  ).length;
   const totalSoldUnits = Object.values(salesMap).reduce(
     (sum, v) => sum + (v !== '' && !Number.isNaN(Number(v)) ? Number(v) : 0),
     0
   );
 
+  const resolveActiveReport = async (): Promise<DepartmentReport> => {
+    if (!account) throw new Error('يرجى تسجيل الدخول بحساب نشط أولاً.');
+    if (!currentSession) {
+      throw new Error(sessionError || 'جلسة الجرد اليومية غير جاهزة بعد.');
+    }
+    if (report && report.sessionId === currentSession.id) return report;
+    const ensured = await ensureDepartmentReport(account, currentSession, 'sales');
+    setReport(ensured);
+    return ensured;
+  };
+
   const handleSaveDraft = async () => {
-    if (!account || !report) return;
     setBusy(true);
     setFeedback(null);
     try {
+      const activeReport = await resolveActiveReport();
       const items = approvedProducts.map((p) => {
         const raw = salesMap[p.id];
         const val = raw === undefined || raw === '' ? null : Number(raw);
@@ -152,7 +176,7 @@ export const SalesWorkspace: React.FC = () => {
           salesQty: val,
         };
       });
-      await saveDepartmentReportDraft(account, report, items);
+      await saveDepartmentReportDraft(account!, activeReport, items);
       setFeedback({ type: 'success', text: 'تم حفظ مسودة تقرير المبيعات بنجاح.' });
     } catch (err) {
       setFeedback({
@@ -165,10 +189,10 @@ export const SalesWorkspace: React.FC = () => {
   };
 
   const handleSubmit = async () => {
-    if (!account || !report) return;
     setBusy(true);
     setFeedback(null);
     try {
+      const activeReport = await resolveActiveReport();
       const items = approvedProducts.map((p) => {
         const raw = salesMap[p.id];
         const val = raw === undefined || raw === '' ? null : Number(raw);
@@ -181,9 +205,9 @@ export const SalesWorkspace: React.FC = () => {
           salesQty: val,
         };
       });
-      await saveDepartmentReportDraft(account, report, items);
+      await saveDepartmentReportDraft(account!, activeReport, items);
       const count = items.filter((i) => i.salesQty !== null).length;
-      await submitDepartmentReport(account, report, count);
+      await submitDepartmentReport(account!, activeReport, count);
       setConfirmOpen(false);
       setFeedback({ type: 'success', text: 'تم ترحيل تقرير المبيعات بالوحدات بنجاح.' });
     } catch (err) {
@@ -250,6 +274,21 @@ export const SalesWorkspace: React.FC = () => {
           )}
         </div>
       </div>
+
+      {sessionError && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 flex flex-wrap items-center justify-between gap-2">
+          <span>{sessionError}</span>
+          <button
+            type="button"
+            onClick={() => void refreshSession()}
+            disabled={sessionLoading}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-white border border-red-200 px-3 py-1.5 text-xs font-bold text-red-700 hover:bg-red-100 cursor-pointer"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${sessionLoading ? 'animate-spin' : ''}`} />
+            <span>إعادة المحاولة</span>
+          </button>
+        </div>
+      )}
 
       {feedback && (
         <div

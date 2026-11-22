@@ -708,23 +708,38 @@ export async function saveDepartmentReportDraft(
   }
 
   try {
+    const existingSnap = await getDocs(
+      query(
+        collection(db, 'departmentReports', report.id, 'items'),
+        where('department', '==', report.department)
+      )
+    );
+    const existingCreatedAtMap = new Map<string, unknown>();
+    existingSnap.forEach((d) => {
+      existingCreatedAtMap.set(d.id, d.data().createdAt);
+    });
+
     const batch = writeBatch(db);
     let enteredCount = 0;
+    const actorName = (actor.fullName || actor.username || 'موظف').trim().slice(0, 120);
 
     for (const item of items) {
       const hasAnyValue =
-        item.preparedQty !== undefined && item.preparedQty !== null ||
-        item.independentProductionQty !== undefined && item.independentProductionQty !== null ||
-        item.salesQty !== undefined && item.salesQty !== null ||
-        item.damagedQty !== undefined && item.damagedQty !== null ||
-        item.validRemainingQty !== undefined && item.validRemainingQty !== null ||
-        item.invalidRemainingQty !== undefined && item.invalidRemainingQty !== null;
+        (item.preparedQty !== undefined && item.preparedQty !== null) ||
+        (item.independentProductionQty !== undefined && item.independentProductionQty !== null) ||
+        (item.salesQty !== undefined && item.salesQty !== null) ||
+        (item.damagedQty !== undefined && item.damagedQty !== null) ||
+        (item.validRemainingQty !== undefined && item.validRemainingQty !== null) ||
+        (item.invalidRemainingQty !== undefined && item.invalidRemainingQty !== null);
 
       if (hasAnyValue) enteredCount++;
 
-      const itemRef = doc(db, 'departmentReports', report.id, 'items', item.productId);
-      const existingSnap = await getDoc(itemRef);
+      const alreadyExists = existingCreatedAtMap.has(item.productId);
+      if (!hasAnyValue && !alreadyExists) {
+        continue;
+      }
 
+      const itemRef = doc(db, 'departmentReports', report.id, 'items', item.productId);
       const payload: Record<string, unknown> = {
         reportId: report.id,
         sessionId: report.sessionId,
@@ -741,15 +756,12 @@ export async function saveDepartmentReportDraft(
         invalidRemainingQty: item.invalidRemainingQty ?? null,
         note: (item.note || '').slice(0, 300),
         updatedBy: actor.uid,
-        updatedByName: actor.fullName,
+        updatedByName: actorName,
         updatedAt: serverTimestamp(),
       };
 
-      if (existingSnap.exists()) {
-        payload.createdAt = existingSnap.data().createdAt;
-      } else {
-        payload.createdAt = serverTimestamp();
-      }
+      const existingCreatedAt = existingCreatedAtMap.get(item.productId);
+      payload.createdAt = existingCreatedAt || serverTimestamp();
 
       batch.set(itemRef, payload);
     }
@@ -777,12 +789,14 @@ export async function submitDepartmentReport(
     throw new Error('لا يمكن ترحيل تقرير فارغ. يرجى إدخال صنف واحد على الأقل (حتى لو بقيمة 0).');
   }
 
+  const actorName = (actor.fullName || actor.username || 'موظف').trim().slice(0, 120);
+
   try {
     await updateDoc(doc(db, 'departmentReports', report.id), {
       status: 'submitted',
       itemCount: enteredCount,
       submittedBy: actor.uid,
-      submittedByName: actor.fullName,
+      submittedByName: actorName,
       updatedAt: serverTimestamp(),
     });
 
@@ -827,6 +841,7 @@ export async function createFactoryTransfer(
   const totalSentQty = roundQty(validItems.reduce((acc, i) => acc + safeNum(i.sentQty), 0));
 
   const batch = writeBatch(db);
+  const actorName = (actor.fullName || actor.username || 'موظف المعمل').trim().slice(0, 120);
   batch.set(doc(db, 'factoryTransfers', transferId), {
     sessionId: session.id,
     branchId: session.branchId,
@@ -838,7 +853,7 @@ export async function createFactoryTransfer(
     totalVarianceQty: 0,
     factoryNote: factoryNote.trim().slice(0, 400),
     createdBy: actor.uid,
-    createdByName: actor.fullName,
+    createdByName: actorName,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -909,6 +924,7 @@ export async function confirmTransferReceipt(
   }
 
   const newStatus = hasDiscrepancy ? 'discrepancy_logged' : 'received';
+  const actorName = (actor.fullName || actor.username || 'موظف الإنتاج').trim().slice(0, 120);
 
   batch.update(doc(db, 'factoryTransfers', transfer.id), {
     status: newStatus,
@@ -916,7 +932,7 @@ export async function confirmTransferReceipt(
     totalVarianceQty: roundQty(totalVarianceQty),
     productionNote: productionNote.trim().slice(0, 400),
     receivedBy: actor.uid,
-    receivedByName: actor.fullName,
+    receivedByName: actorName,
     updatedAt: serverTimestamp(),
   });
 
@@ -950,6 +966,7 @@ export async function addIndependentProduction(
     throw new Error('يجب أن تكون كمية الإنتاج المستقل أكبر من صفر.');
   }
   const entryId = makeUniqueId('ind');
+  const actorName = (actor.fullName || actor.username || 'موظف الإنتاج').trim().slice(0, 120);
   try {
     await setDoc(doc(db, 'productionEntries', entryId), {
       sessionId: session.id,
@@ -959,7 +976,7 @@ export async function addIndependentProduction(
       qty: safeNum(qty),
       note: note.trim().slice(0, 300),
       createdBy: actor.uid,
-      createdByName: actor.fullName,
+      createdByName: actorName,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -1035,7 +1052,7 @@ export async function recalculateSessionResults(
       });
     }
 
-    // 3. Independent production entries
+    // 3. Independent production entries (used while production report is still draft)
     const indProdMap = new Map<string, number>();
     const prodEntriesSnap = await getDocs(
       query(collection(db, 'productionEntries'), where('sessionId', '==', session.id))
@@ -1050,6 +1067,8 @@ export async function recalculateSessionResults(
     const damagedMap = new Map<string, number>();
     const validRemMap = new Map<string, number>();
     const invalidRemMap = new Map<string, number>();
+    const submittedProdMap = new Map<string, number>();
+    let hasSubmittedProdReport = false;
 
     const reportsSnap = await getDocs(
       query(collection(db, 'departmentReports'), where('sessionId', '==', session.id))
@@ -1058,13 +1077,13 @@ export async function recalculateSessionResults(
       const rep = repDoc.data() as DepartmentReport;
       if (rep.status === 'draft') continue;
       const itemsSnap = await getDocs(collection(db, 'departmentReports', repDoc.id, 'items'));
+      if (rep.department === 'production') {
+        hasSubmittedProdReport = true;
+      }
       itemsSnap.forEach((itemDoc) => {
         const item = itemDoc.data() as DepartmentReportItem;
-        if (rep.department === 'production' && item.independentProductionQty) {
-          indProdMap.set(
-            item.productId,
-            (indProdMap.get(item.productId) || 0) + safeNum(item.independentProductionQty)
-          );
+        if (rep.department === 'production' && item.independentProductionQty !== null && item.independentProductionQty !== undefined) {
+          submittedProdMap.set(item.productId, safeNum(item.independentProductionQty));
         }
         if (rep.department === 'sales') {
           salesMap.set(item.productId, safeNum(item.salesQty ?? 0));
@@ -1074,6 +1093,13 @@ export async function recalculateSessionResults(
           validRemMap.set(item.productId, safeNum(item.validRemainingQty ?? 0));
           invalidRemMap.set(item.productId, safeNum(item.invalidRemainingQty ?? 0));
         }
+      });
+    }
+
+    if (hasSubmittedProdReport) {
+      indProdMap.clear();
+      submittedProdMap.forEach((val, key) => {
+        indProdMap.set(key, val);
       });
     }
 

@@ -6,7 +6,7 @@ import {
   query,
   where,
 } from 'firebase/firestore';
-import { Edit3, Info, Save, Search, Send } from 'lucide-react';
+import { Edit3, Info, RefreshCw, Save, Search, Send } from 'lucide-react';
 import { REPORT_STATUS_LABELS } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { OperationType, db, handleFirestoreError } from '../../services/firebase/config';
@@ -32,7 +32,15 @@ interface WasteDraftRow {
 }
 
 export const WasteWorkspace: React.FC = () => {
-  const { account, currentSession, categories, products } = useFirebase();
+  const {
+    account,
+    currentSession,
+    sessionLoading,
+    sessionError,
+    refreshSession,
+    categories,
+    products,
+  } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
   const [wasteMap, setWasteMap] = useState<Record<string, WasteDraftRow>>({});
@@ -64,6 +72,8 @@ export const WasteWorkspace: React.FC = () => {
   const categoryMap = useMemo(() => new Map(categories.map((c) => [c.id, c.name])), [categories]);
 
   useEffect(() => {
+    setReport(null);
+    setWasteMap({});
     if (!account || !currentSession) return;
     let active = true;
     ensureDepartmentReport(account, currentSession, 'waste')
@@ -144,10 +154,11 @@ export const WasteWorkspace: React.FC = () => {
   };
 
   const enteredCount = useMemo(() => {
-    return Object.values(wasteMap).filter(
-      (r) => r.damagedQty !== '' || r.validRemainingQty !== '' || r.invalidRemainingQty !== ''
-    ).length;
-  }, [wasteMap]);
+    return approvedProducts.filter((p) => {
+      const r = wasteMap[p.id];
+      return r && (r.damagedQty !== '' || r.validRemainingQty !== '' || r.invalidRemainingQty !== '');
+    }).length;
+  }, [approvedProducts, wasteMap]);
 
   const parseItemsForSave = () => {
     return approvedProducts.map((p) => {
@@ -170,13 +181,24 @@ export const WasteWorkspace: React.FC = () => {
     });
   };
 
+  const resolveActiveReport = async (): Promise<DepartmentReport> => {
+    if (!account) throw new Error('يرجى تسجيل الدخول بحساب نشط أولاً.');
+    if (!currentSession) {
+      throw new Error(sessionError || 'جلسة الجرد اليومية غير جاهزة بعد.');
+    }
+    if (report && report.sessionId === currentSession.id) return report;
+    const ensured = await ensureDepartmentReport(account, currentSession, 'waste');
+    setReport(ensured);
+    return ensured;
+  };
+
   const handleSaveDraft = async () => {
-    if (!account || !report) return;
     setBusy(true);
     setFeedback(null);
     try {
+      const activeReport = await resolveActiveReport();
       const items = parseItemsForSave();
-      await saveDepartmentReportDraft(account, report, items);
+      await saveDepartmentReportDraft(account!, activeReport, items);
       setFeedback({ type: 'success', text: 'تم حفظ مسودة الهدر والمتبقي بنجاح.' });
     } catch (err) {
       setFeedback({
@@ -189,19 +211,19 @@ export const WasteWorkspace: React.FC = () => {
   };
 
   const handleSubmit = async () => {
-    if (!account || !report) return;
     setBusy(true);
     setFeedback(null);
     try {
+      const activeReport = await resolveActiveReport();
       const items = parseItemsForSave();
-      await saveDepartmentReportDraft(account, report, items);
+      await saveDepartmentReportDraft(account!, activeReport, items);
       const count = items.filter(
         (i) =>
           i.damagedQty !== null ||
           i.validRemainingQty !== null ||
           i.invalidRemainingQty !== null
       ).length;
-      await submitDepartmentReport(account, report, count);
+      await submitDepartmentReport(account!, activeReport, count);
       setConfirmOpen(false);
       setFeedback({ type: 'success', text: 'تم ترحيل تقرير الهدر والمتبقي بنجاح.' });
     } catch (err) {
@@ -277,6 +299,21 @@ export const WasteWorkspace: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {sessionError && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 flex flex-wrap items-center justify-between gap-2">
+          <span>{sessionError}</span>
+          <button
+            type="button"
+            onClick={() => void refreshSession()}
+            disabled={sessionLoading}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-white border border-red-200 px-3 py-1.5 text-xs font-bold text-red-700 hover:bg-red-100 cursor-pointer"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${sessionLoading ? 'animate-spin' : ''}`} />
+            <span>إعادة المحاولة</span>
+          </button>
+        </div>
+      )}
 
       {feedback && (
         <div

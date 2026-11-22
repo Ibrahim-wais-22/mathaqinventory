@@ -41,7 +41,7 @@ import {
   handleFirestoreError,
   testConnection,
 } from '../../services/firebase/config';
-import { ensureDailySession } from '../../services/inventory/firestoreService';
+import { ensureDailySession, formatActionError } from '../../services/inventory/firestoreService';
 import { ensureInitialSeedData } from '../../services/inventory/seedService';
 
 interface FirebaseContextValue {
@@ -56,6 +56,7 @@ interface FirebaseContextValue {
   activeBranchId: string;
   currentSession: DailySession | null;
   sessionLoading: boolean;
+  sessionError: string | null;
   categories: Category[];
   products: Product[];
   signInWithGoogle: () => Promise<void>;
@@ -80,6 +81,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [activeBranchId] = useState<string>(DEFAULT_BRANCH_ID);
   const [currentSession, setCurrentSession] = useState<DailySession | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
 
@@ -189,19 +191,32 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   useEffect(() => {
     if (!account || account.status !== 'active') {
       setCurrentSession(null);
+      setSessionError(null);
       return;
     }
 
     let cancelled = false;
     setSessionLoading(true);
+    setSessionError(null);
     const sessionId = `${activeBranchId}_${inventoryDate}`;
 
     ensureDailySession(account, activeBranchId, inventoryDate)
       .then((sess) => {
-        if (!cancelled) setCurrentSession(sess);
+        if (!cancelled) {
+          setCurrentSession(sess);
+          setSessionError(null);
+        }
       })
       .catch((err) => {
         console.error('Session error:', err);
+        if (!cancelled) {
+          setSessionError(
+            formatActionError(
+              err,
+              'تعذر فتح جلسة الجرد اليومية. تأكد من تهيئة بيانات الفرع وصلاحيات الحساب.'
+            )
+          );
+        }
       })
       .finally(() => {
         if (!cancelled) setSessionLoading(false);
@@ -212,9 +227,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       (snap) => {
         if (snap.exists()) {
           setCurrentSession({ id: snap.id, ...(snap.data() as Omit<DailySession, 'id'>) });
+          setSessionError(null);
         }
       },
-      (err) => handleFirestoreError(err, OperationType.GET, `dailySessions/${sessionId}`)
+      (err) => {
+        if (!cancelled) {
+          setSessionError(formatActionError(err, 'تعذر متابعة جلسة الجرد اليومية.'));
+        }
+        handleFirestoreError(err, OperationType.GET, `dailySessions/${sessionId}`);
+      }
     );
 
     return () => {
@@ -239,8 +260,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const refreshSession = async () => {
     if (!account || account.status !== 'active') return;
-    const sess = await ensureDailySession(account, activeBranchId, inventoryDate);
-    setCurrentSession(sess);
+    setSessionError(null);
+    setSessionLoading(true);
+    try {
+      const sess = await ensureDailySession(account, activeBranchId, inventoryDate);
+      setCurrentSession(sess);
+    } catch (err) {
+      setSessionError(formatActionError(err, 'تعذر تحديث جلسة الجرد اليومية.'));
+    } finally {
+      setSessionLoading(false);
+    }
   };
 
   const isAdmin = useMemo(() => {
@@ -271,6 +300,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         activeBranchId,
         currentSession,
         sessionLoading,
+        sessionError,
         categories,
         products,
         signInWithGoogle,

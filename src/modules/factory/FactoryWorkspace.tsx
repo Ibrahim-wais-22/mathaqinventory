@@ -2,19 +2,21 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   collection,
   doc,
+  getDocs,
   onSnapshot,
   query,
   where,
 } from 'firebase/firestore';
 import {
-  CheckCircle2,
+  CopyCheck,
+  Edit3,
+  PackagePlus,
   Plus,
+  RefreshCw,
+  Save,
   Search,
   Send,
   Truck,
-  Save,
-  PackagePlus,
-  Edit3,
 } from 'lucide-react';
 import {
   PRODUCT_APPROVAL_LABELS,
@@ -43,7 +45,15 @@ import { StatusBadge } from '../../components/common/StatusBadge';
 import { formatTimestampAden } from '../../utils/dateAden';
 
 export const FactoryWorkspace: React.FC = () => {
-  const { account, currentSession, categories, products } = useFirebase();
+  const {
+    account,
+    currentSession,
+    sessionLoading,
+    sessionError,
+    refreshSession,
+    categories,
+    products,
+  } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
   const [preparedMap, setPreparedMap] = useState<Record<string, string>>({});
@@ -84,6 +94,9 @@ export const FactoryWorkspace: React.FC = () => {
 
   // Load or initialize Factory report + items
   useEffect(() => {
+    setReport(null);
+    setPreparedMap({});
+    setTransfers([]);
     if (!account || !currentSession) return;
     let active = true;
     ensureDepartmentReport(account, currentSession, 'factory')
@@ -169,14 +182,30 @@ export const FactoryWorkspace: React.FC = () => {
   const isSubmitted = report ? report.status !== 'draft' : false;
 
   const enteredPreparedCount = useMemo(() => {
-    return Object.values(preparedMap).filter((v) => v !== '' && v !== undefined).length;
-  }, [preparedMap]);
+    return approvedProducts.filter((p) => preparedMap[p.id] !== '' && preparedMap[p.id] !== undefined)
+      .length;
+  }, [approvedProducts, preparedMap]);
+
+  const resolveActiveReport = async (): Promise<DepartmentReport> => {
+    if (!account) {
+      throw new Error('يرجى تسجيل الدخول بحساب نشط أولاً.');
+    }
+    if (!currentSession) {
+      throw new Error(sessionError || 'جلسة الجرد اليومية غير جاهزة بعد. يرجى تحديث الجلسة.');
+    }
+    if (report && report.sessionId === currentSession.id) {
+      return report;
+    }
+    const ensured = await ensureDepartmentReport(account, currentSession, 'factory');
+    setReport(ensured);
+    return ensured;
+  };
 
   const handleSaveDraft = async () => {
-    if (!account || !report) return;
     setBusy(true);
     setFeedback(null);
     try {
+      const activeReport = await resolveActiveReport();
       const items = approvedProducts.map((p) => {
         const raw = preparedMap[p.id];
         const val = raw === undefined || raw === '' ? null : Number(raw);
@@ -189,7 +218,7 @@ export const FactoryWorkspace: React.FC = () => {
           preparedQty: val,
         };
       });
-      await saveDepartmentReportDraft(account, report, items);
+      await saveDepartmentReportDraft(account!, activeReport, items);
       setFeedback({ type: 'success', text: 'تم حفظ مسودة تقرير المعمل بنجاح.' });
     } catch (err) {
       setFeedback({
@@ -202,10 +231,10 @@ export const FactoryWorkspace: React.FC = () => {
   };
 
   const handleSubmitReport = async () => {
-    if (!account || !report) return;
     setBusy(true);
     setFeedback(null);
     try {
+      const activeReport = await resolveActiveReport();
       const items = approvedProducts.map((p) => {
         const raw = preparedMap[p.id];
         const val = raw === undefined || raw === '' ? null : Number(raw);
@@ -218,9 +247,9 @@ export const FactoryWorkspace: React.FC = () => {
           preparedQty: val,
         };
       });
-      await saveDepartmentReportDraft(account, report, items);
+      await saveDepartmentReportDraft(account!, activeReport, items);
       const count = items.filter((i) => i.preparedQty !== null).length;
-      await submitDepartmentReport(account, report, count);
+      await submitDepartmentReport(account!, activeReport, count);
       setConfirmSubmitOpen(false);
       setFeedback({ type: 'success', text: 'تم ترحيل تقرير المعمل وإغلاق التعديل المباشر.' });
     } catch (err) {
@@ -234,8 +263,54 @@ export const FactoryWorkspace: React.FC = () => {
     }
   };
 
+  const handleFillPreparedFromTransfers = async () => {
+    if (transfers.length === 0) {
+      setFeedback({ type: 'error', text: 'لا توجد توريدات مرسلة اليوم للنسخ منها.' });
+      return;
+    }
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const summed = new Map<string, number>();
+      for (const trf of transfers) {
+        const itemsSnap = await getDocs(collection(db, 'factoryTransfers', trf.id, 'items'));
+        itemsSnap.forEach((d) => {
+          const data = d.data() as { productId?: string; sentQty?: number };
+          if (data.productId) {
+            summed.set(data.productId, (summed.get(data.productId) || 0) + Number(data.sentQty || 0));
+          }
+        });
+      }
+      setPreparedMap((prev) => {
+        const next = { ...prev };
+        summed.forEach((qty, pid) => {
+          next[pid] = String(Math.round(qty * 1000) / 1000);
+        });
+        return next;
+      });
+      setFeedback({
+        type: 'success',
+        text: 'تم تعبئة الكميات المجهزة من إجمالي التوريدات المرسلة اليوم. يمكنك مراجعتها ثم الترحيل.',
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: formatActionError(err, 'تعذر جلب تفاصيل التوريدات.'),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleCreateTransfer = async () => {
-    if (!account || !currentSession) return;
+    if (!account || !currentSession) {
+      setConfirmTransferOpen(false);
+      setFeedback({
+        type: 'error',
+        text: sessionError || 'جلسة الجرد اليومية غير متاحة حالياً. يرجى تحديث الصفحة.',
+      });
+      return;
+    }
     setBusy(true);
     setFeedback(null);
     try {
@@ -372,6 +447,21 @@ export const FactoryWorkspace: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {sessionError && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 flex flex-wrap items-center justify-between gap-2">
+          <span>{sessionError}</span>
+          <button
+            type="button"
+            onClick={() => void refreshSession()}
+            disabled={sessionLoading}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-white border border-red-200 px-3 py-1.5 text-xs font-bold text-red-700 hover:bg-red-100 cursor-pointer"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${sessionLoading ? 'animate-spin' : ''}`} />
+            <span>إعادة المحاولة</span>
+          </button>
+        </div>
+      )}
 
       {feedback && (
         <div
@@ -591,7 +681,18 @@ export const FactoryWorkspace: React.FC = () => {
               </p>
             </div>
             {!isSubmitted && !isSessionClosed && (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {transfers.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleFillPreparedFromTransfers()}
+                    className="min-h-[42px] inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100 cursor-pointer"
+                  >
+                    <CopyCheck className="h-4 w-4" />
+                    <span>تعبئة من التوريدات المرسلة</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={busy}

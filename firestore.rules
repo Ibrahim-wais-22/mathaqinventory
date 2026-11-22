@@ -222,7 +222,7 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
     match /userInvites/{inviteId} {
-      allow get: if isSignedIn() && isValidId(inviteId) && (isAdmin() || existing().email == request.auth.token.email);
+      allow get: if isSignedIn() && isValidId(inviteId) && (isAdmin() || (resource != null && existing().email == request.auth.token.email));
       allow list: if isAdmin() || (isSignedIn() && existing().email == request.auth.token.email);
       allow create: if isAdmin() && isValidId(inviteId) && isValidUserInvite(incoming()) &&
         incoming().createdBy == request.auth.uid &&
@@ -289,11 +289,11 @@ service cloud.firestore {
     }
     match /products/{productId} {
       allow get: if isActiveUser() && isValidId(productId) &&
-        (canManageCatalog() || isDept('production') || existing().createdBy == request.auth.uid || existing().approvalStatus == 'approved');
+        (canManageCatalog() || isDept('production') || (resource != null && (existing().createdBy == request.auth.uid || existing().approvalStatus == 'approved')));
       allow list: if isActiveUser() &&
         (canManageCatalog() || isDept('production') || existing().createdBy == request.auth.uid || existing().approvalStatus == 'approved');
       allow create: if isSignedIn() && isValidId(productId) && isValidProduct(incoming()) &&
-        exists(/databases/$(database)/documents/categories/$(incoming().categoryId)) &&
+        existsAfter(/databases/$(database)/documents/categories/$(incoming().categoryId)) &&
         incoming().createdBy == request.auth.uid &&
         incoming().createdAt == request.time && incoming().updatedAt == request.time &&
         (
@@ -397,7 +397,11 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
     match /departmentReports/{reportId} {
-      allow get: if isActiveUser() && isValidId(reportId) && (isAdmin() || userDepartment() == existing().department);
+      allow get: if isActiveUser() && isValidId(reportId) && (
+        isAdmin() ||
+        (resource == null && reportId.matches('.*_' + userDepartment() + '$')) ||
+        (resource != null && userDepartment() == existing().department)
+      );
       allow list: if isActiveUser() && (isAdmin() || userDepartment() == existing().department);
       allow create: if isActiveUser() && isValidId(reportId) && isValidDepartmentReport(incoming()) &&
         exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
@@ -425,8 +429,13 @@ service cloud.firestore {
         );
 
       match /items/{productId} {
-        allow get: if isActiveUser() && isValidId(reportId) && isValidId(productId) &&
-          (isAdmin() || userDepartment() == get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department);
+        allow get: if isActiveUser() && isValidId(reportId) && isValidId(productId) && (
+          isAdmin() ||
+          (
+            exists(/databases/$(database)/documents/departmentReports/$(reportId)) &&
+            userDepartment() == get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department
+          )
+        );
         allow list: if isActiveUser() && (isAdmin() || userDepartment() == existing().department);
         allow create: if isActiveUser() && isValidId(reportId) && isValidId(productId) && isValidDepartmentReportItem(incoming()) &&
           incoming().reportId == reportId &&
@@ -532,7 +541,7 @@ service cloud.firestore {
           incoming().transferId == transferId &&
           incoming().productId == productId &&
           incoming().createdAt == request.time && incoming().updatedAt == request.time &&
-          exists(/databases/$(database)/documents/factoryTransfers/$(transferId)) &&
+          existsAfter(/databases/$(database)/documents/factoryTransfers/$(transferId)) &&
           sessionIsOpen(incoming().sessionId) &&
           (isAdmin() || isDept('factory'));
         allow update: if isActiveUser() && isValidId(transferId) && isValidId(productId) && isValidFactoryTransferItem(incoming()) &&
@@ -656,7 +665,7 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
     match /approvals/{approvalId} {
-      allow get: if isActiveUser() && isValidId(approvalId) && (isAdmin() || existing().requestedBy == request.auth.uid || isDept('production'));
+      allow get: if isActiveUser() && isValidId(approvalId) && (isAdmin() || isDept('production') || (resource != null && existing().requestedBy == request.auth.uid));
       allow list: if isActiveUser() && (isAdmin() || isDept('production') || existing().requestedBy == request.auth.uid);
       allow create: if isActiveUser() && isValidId(approvalId) && isValidApprovalRequest(incoming()) &&
         incoming().requestedBy == request.auth.uid &&

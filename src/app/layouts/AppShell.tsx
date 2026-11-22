@@ -84,134 +84,95 @@ export const AppShell: React.FC<{
   }, [account, isAdmin, hasPermission]);
 
   const allowBackdate = isAdmin || hasPermission('backdate_entries');
-  const activeItem = navItems.find((i) => i.id === activeTab) || navItems[0];
 
   return (
-    <div className="min-h-screen bg-[#FAFAFA] text-[#18181B] flex flex-col lg:flex-row" dir="rtl">
-      {/* Desktop Sidebar */}
-      <aside className="hidden lg:flex lg:w-[264px] lg:flex-col lg:fixed lg:inset-y-0 lg:right-0 bg-white border-l border-zinc-200 z-30 no-print">
-        <div className="p-5 border-b border-zinc-100 flex items-center gap-3">
-          <BrandLogo size="md" />
-          <div className="min-w-0">
-            <div className="font-display font-bold text-sm text-zinc-900 truncate">{BRAND_NAME}</div>
-            <div className="text-xs text-zinc-500 truncate">متابعة الجرد اليومي</div>
+    <div className="min-h-screen bg-[#FAFAFA] text-[#18181B] flex flex-col" dir="rtl">
+      {/* Sticky Top Header + Top Tab Bar */}
+      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-zinc-200 no-print">
+        {/* Top Utility Row: Brand, Date Control, User & Logout */}
+        <div className="max-w-7xl mx-auto px-4 lg:px-8 h-14 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <BrandLogo size="sm" />
+            <div className="min-w-0 flex items-center gap-2">
+              <span className="font-display font-bold text-sm lg:text-base text-zinc-900 whitespace-nowrap truncate">
+                {BRAND_NAME}
+              </span>
+              {account && (
+                <span className="hidden xl:inline text-xs text-zinc-500 whitespace-nowrap truncate">
+                  · {account.fullName} ({ROLE_LABELS[account.role]} ·{' '}
+                  {DEPARTMENT_LABELS[account.department]})
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            {/* Inventory Date Selector (Asia/Aden) */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <Calendar className="h-4 w-4 text-zinc-400 hidden sm:block" />
+              <input
+                type="date"
+                value={inventoryDate}
+                disabled={!allowBackdate}
+                onChange={(e) => setInventoryDate(e.target.value)}
+                aria-label="تاريخ الجرد"
+                className="min-h-[36px] rounded-xl border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-800 tabular-nums disabled:bg-zinc-100"
+              />
+              {currentSession && (
+                <span className="hidden md:inline text-xs text-zinc-500 whitespace-nowrap">
+                  · {SESSION_STATUS_LABELS[currentSession.status]}
+                </span>
+              )}
+            </div>
+
+            <PWAInstallButton />
+
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="min-h-[36px] inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-2.5 sm:px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              aria-label="تسجيل الخروج"
+            >
+              <LogOut className="h-4 w-4 shrink-0" />
+              <span className="hidden sm:inline">تسجيل الخروج</span>
+            </button>
           </div>
         </div>
 
-        <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const active = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onSelectTab(item.id)}
-                className={`w-full min-h-[42px] flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                  active
-                    ? 'bg-[#D91B23] text-white'
-                    : 'text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900'
-                }`}
-              >
-                <Icon className="h-4 w-4 shrink-0" />
-                <span className="truncate">{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-
-        {account && (
-          <div className="p-4 border-t border-zinc-100 space-y-3">
-            <div className="text-xs space-y-0.5">
-              <div className="font-bold text-zinc-900 truncate">{account.fullName}</div>
-              <div className="text-zinc-500 truncate">
-                {ROLE_LABELS[account.role]} · {DEPARTMENT_LABELS[account.department]}
-              </div>
-              <div className="font-mono text-[11px] text-zinc-400 tabular-nums">
-                {account.employeeNumber}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => void logout()}
-              className="w-full min-h-[40px] inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 cursor-pointer"
-            >
-              <LogOut className="h-4 w-4" />
-              <span>تسجيل الخروج</span>
-            </button>
-          </div>
-        )}
-      </aside>
+        {/* Horizontal Top Navigation Tab Bar */}
+        <div className="border-t border-zinc-100 bg-white">
+          <nav
+            aria-label="التنقل الرئيسي"
+            className="max-w-7xl mx-auto px-4 lg:px-8 flex items-center gap-1 overflow-x-auto"
+          >
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const active = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onSelectTab(item.id)}
+                  aria-current={active ? 'page' : undefined}
+                  className={`min-h-[44px] inline-flex items-center gap-2 px-3.5 py-2 text-xs sm:text-sm border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    active
+                      ? 'border-[#D91B23] text-[#D91B23] font-bold bg-red-50/40'
+                      : 'border-transparent text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50 font-semibold'
+                  }`}
+                >
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      </header>
 
       {/* Main Content Area */}
-      <div className="flex-1 lg:pr-[264px] flex flex-col min-w-0">
-        {/* Top Bar */}
-        <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-zinc-200 px-4 lg:px-8 h-16 flex items-center justify-between gap-4 no-print">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="lg:hidden">
-              <BrandLogo size="sm" />
-            </div>
-            <h1 className="text-base font-bold text-zinc-900 font-display truncate">
-              {activeItem?.label || BRAND_NAME}
-            </h1>
-          </div>
-
-          {/* Inventory Date Selector (Asia/Aden) */}
-          <div className="flex items-center gap-2 shrink-0">
-            <Calendar className="h-4 w-4 text-zinc-400 hidden sm:block" />
-            <input
-              type="date"
-              value={inventoryDate}
-              disabled={!allowBackdate}
-              onChange={(e) => setInventoryDate(e.target.value)}
-              aria-label="تاريخ الجرد"
-              className="min-h-[38px] rounded-xl border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-800 tabular-nums disabled:bg-zinc-100"
-            />
-            {currentSession && (
-              <span className="hidden md:inline text-xs text-zinc-500 whitespace-nowrap">
-                · {SESSION_STATUS_LABELS[currentSession.status]}
-              </span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <PWAInstallButton />
-            <button
-              type="button"
-              onClick={() => void logout()}
-              className="lg:hidden min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl border border-zinc-200 text-zinc-700 cursor-pointer"
-              aria-label="تسجيل الخروج"
-            >
-              <LogOut className="h-4 w-4" />
-            </button>
-          </div>
-        </header>
-
-        <main className="flex-1 p-4 lg:p-8 pb-24 lg:pb-10 max-w-7xl w-full mx-auto">
-          {children}
-        </main>
-      </div>
-
-      {/* Mobile Bottom Navigation */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur border-t border-zinc-200 flex items-center overflow-x-auto px-2 h-16 no-print">
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          const active = activeTab === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => onSelectTab(item.id)}
-              className={`min-w-[72px] flex-1 h-full flex flex-col items-center justify-center gap-1 px-2 cursor-pointer ${
-                active ? 'text-[#D91B23]' : 'text-zinc-500'
-              }`}
-            >
-              <Icon className="h-5 w-5" />
-              <span className="text-[10px] font-semibold whitespace-nowrap">{item.label}</span>
-            </button>
-          );
-        })}
-      </nav>
+      <main className="flex-1 p-4 lg:p-8 pb-10 max-w-7xl w-full mx-auto">
+        {children}
+      </main>
 
       <OfflineIndicator />
     </div>
