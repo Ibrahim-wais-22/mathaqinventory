@@ -1,0 +1,6 @@
+{
+  "name": "نظام متابعة الجرد اليومي — المذاق اليمني",
+  "description": "تطبيق ويب متكامل لإدارة ومتابعة الجرد اليومي للمنتجات الجاهزة للبيع في مطاعم المذاق اليمني",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

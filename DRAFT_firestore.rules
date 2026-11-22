@@ -1,0 +1,709 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Primitive Helpers
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isSignedIn() { return request.auth != null && request.auth.token.email_verified == true; }
+    function isValidId(id) { return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }
+    function isBootstrapAdmin() {
+      return isSignedIn() && request.auth.token.email.lower() == 'mathaqinventory@gmail.com';
+    }
+    function isAdmin() {
+      return isBootstrapAdmin() || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function isActiveUser() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        userDoc().status == 'active';
+    }
+    function userDepartment() {
+      return userDoc().department;
+    }
+    function isDept(dept) {
+      return isActiveUser() && userDepartment() == dept;
+    }
+    function hasPerm(perm) {
+      return isActiveUser() && (userDoc().permissions.hasAny([perm]) || isAdmin());
+    }
+    function canManageCatalog() {
+      return isAdmin() || hasPerm('manage_catalog');
+    }
+    function isValidString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() > 0 && val.size() <= maxLen;
+    }
+    function isNonNegNumber(val) {
+      return (val is int || val is float) && val >= 0 && val <= 1000000;
+    }
+    function isValidDateStr(val) {
+      return val is string && val.size() == 10 && val.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+    function sessionIsOpen(sessionId) {
+      return get(/databases/$(database)/documents/dailySessions/$(sessionId)).data.status in ['open', 'reopened'];
+    }
+
+    // Connection check doc
+    match /test/connection {
+      allow get: if isSignedIn();
+    }
+
+    // Admins Registry
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'role', 'email', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'role', 'email', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.role in ['ceo', 'branch_manager'] &&
+        isNonEmptyString(data.email, 200) &&
+        data.createdAt is timestamp;
+    }
+    match /admins/{uid} {
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && isValidId(uid) && isValidAdminRecord(incoming()) &&
+        incoming().createdAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            isBootstrapAdmin() &&
+            uid == request.auth.uid &&
+            incoming().uid == request.auth.uid &&
+            incoming().email == request.auth.token.email
+          ) ||
+          (
+            uid == request.auth.uid &&
+            incoming().uid == request.auth.uid &&
+            incoming().email == request.auth.token.email &&
+            exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+            userDoc().role == incoming().role &&
+            userDoc().status == 'active'
+          )
+        );
+      allow update: if isAdmin() && isValidId(uid) && isValidAdminRecord(incoming()) &&
+        incoming().uid == existing().uid && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin() && uid != request.auth.uid;
+    }
+
+    // Branches
+    function isValidBranch(data) {
+      return data.keys().hasAll(['name', 'code', 'timezone', 'isActive', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'code', 'timezone', 'isActive', 'createdAt', 'updatedAt']) &&
+        isNonEmptyString(data.name, 120) &&
+        isValidId(data.code) &&
+        isNonEmptyString(data.timezone, 64) &&
+        data.isActive is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /branches/{branchId} {
+      allow get: if isSignedIn() && isValidId(branchId);
+      allow list: if isActiveUser() || isAdmin();
+      allow create: if isAdmin() && isValidId(branchId) && isValidBranch(incoming()) &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(branchId) && isValidBranch(incoming()) &&
+        incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time;
+    }
+
+    // System Settings
+    function isValidSystemSetting(data) {
+      return data.keys().hasAll(['timezone', 'activeBranchId', 'seeded', 'updatedBy', 'updatedAt']) &&
+        data.keys().hasOnly(['timezone', 'activeBranchId', 'seeded', 'updatedBy', 'updatedAt']) &&
+        isNonEmptyString(data.timezone, 64) &&
+        isValidId(data.activeBranchId) &&
+        data.seeded is bool &&
+        isNonEmptyString(data.updatedBy, 128) &&
+        data.updatedAt is timestamp;
+    }
+    match /systemSettings/{settingId} {
+      allow get: if isSignedIn() && isValidId(settingId);
+      allow create: if isAdmin() && isValidId(settingId) && isValidSystemSetting(incoming()) &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(settingId) && isValidSystemSetting(incoming()) &&
+        incoming().updatedAt == request.time;
+    }
+
+    // Users (PII strictly isolated to owner or Admin)
+    function isValidUserAccount(data) {
+      return data.keys().hasAll(['uid', 'employeeNumber', 'username', 'fullName', 'email', 'department', 'role', 'branchId', 'status', 'permissions', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'employeeNumber', 'username', 'fullName', 'email', 'department', 'role', 'branchId', 'status', 'permissions', 'inviteId', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        isNonEmptyString(data.employeeNumber, 40) &&
+        isNonEmptyString(data.username, 80) &&
+        isNonEmptyString(data.fullName, 120) &&
+        isNonEmptyString(data.email, 200) &&
+        data.department in ['management', 'factory', 'production', 'sales', 'waste'] &&
+        data.role in ['ceo', 'branch_manager', 'factory_staff', 'production_staff', 'sales_staff', 'waste_staff', 'pending'] &&
+        isValidId(data.branchId) &&
+        data.status in ['active', 'suspended', 'pending_activation'] &&
+        data.permissions is list && data.permissions.size() <= 30 &&
+        (data.permissions.size() == 0 || data.permissions[0] is string) &&
+        (!('inviteId' in data) || isValidId(data.inviteId)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    function matchesInvite(data) {
+      return 'inviteId' in data &&
+        isValidId(data.inviteId) &&
+        exists(/databases/$(database)/documents/userInvites/$(data.inviteId)) &&
+        get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.email == request.auth.token.email &&
+        get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.claimed == false &&
+        data.role == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.role &&
+        data.department == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.department &&
+        data.status == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.status &&
+        data.permissions == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.permissions &&
+        data.branchId == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.branchId;
+    }
+    match /users/{uid} {
+      allow get: if (isOwner(uid) || isAdmin()) && isValidId(uid);
+      allow list: if isAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(uid) && isValidUserAccount(incoming()) &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            uid == request.auth.uid &&
+            incoming().uid == request.auth.uid &&
+            incoming().email == request.auth.token.email &&
+            (
+              matchesInvite(incoming()) ||
+              (
+                incoming().role == 'pending' &&
+                incoming().status == 'pending_activation' &&
+                incoming().permissions.size() == 0
+              )
+            )
+          )
+        );
+      allow update: if isSignedIn() && isValidId(uid) && isValidUserAccount(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            isOwner(uid) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'updatedAt'])
+          )
+        );
+    }
+
+    // User Invites (Pre-assigned roles by Admin)
+    function isValidUserInvite(data) {
+      return data.keys().hasAll(['email', 'employeeNumber', 'username', 'fullName', 'department', 'role', 'branchId', 'status', 'permissions', 'claimed', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['email', 'employeeNumber', 'username', 'fullName', 'department', 'role', 'branchId', 'status', 'permissions', 'claimed', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isNonEmptyString(data.email, 200) &&
+        isNonEmptyString(data.employeeNumber, 40) &&
+        isNonEmptyString(data.username, 80) &&
+        isNonEmptyString(data.fullName, 120) &&
+        data.department in ['management', 'factory', 'production', 'sales', 'waste'] &&
+        data.role in ['ceo', 'branch_manager', 'factory_staff', 'production_staff', 'sales_staff', 'waste_staff'] &&
+        isValidId(data.branchId) &&
+        data.status in ['active', 'suspended'] &&
+        data.permissions is list && data.permissions.size() <= 30 &&
+        (data.permissions.size() == 0 || data.permissions[0] is string) &&
+        data.claimed is bool &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /userInvites/{inviteId} {
+      allow get: if isSignedIn() && isValidId(inviteId) && (isAdmin() || existing().email == request.auth.token.email);
+      allow list: if isAdmin() || (isSignedIn() && existing().email == request.auth.token.email);
+      allow create: if isAdmin() && isValidId(inviteId) && isValidUserInvite(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isSignedIn() && isValidId(inviteId) && isValidUserInvite(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            existing().email == request.auth.token.email &&
+            existing().claimed == false &&
+            incoming().claimed == true &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['claimed', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(inviteId);
+    }
+
+    // Categories
+    function isValidCategory(data) {
+      return data.keys().hasAll(['name', 'sortOrder', 'isActive', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'sortOrder', 'isActive', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isNonEmptyString(data.name, 100) &&
+        isNonNegNumber(data.sortOrder) &&
+        data.isActive is bool &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /categories/{categoryId} {
+      allow get: if isSignedIn() && isValidId(categoryId);
+      allow list: if isActiveUser() || isAdmin();
+      allow create: if canManageCatalog() && isValidId(categoryId) && isValidCategory(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if canManageCatalog() && isValidId(categoryId) && isValidCategory(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+    }
+
+    // Products
+    function isValidProduct(data) {
+      return data.keys().hasAll(['name', 'categoryId', 'unit', 'isActive', 'approvalStatus', 'allowedDepartments', 'createdBy', 'createdByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'categoryId', 'unit', 'isActive', 'approvalStatus', 'allowedDepartments', 'createdBy', 'createdByName', 'technicalApprovedBy', 'technicalApprovedByName', 'adminApprovedBy', 'adminApprovedByName', 'rejectionReason', 'createdAt', 'updatedAt']) &&
+        isNonEmptyString(data.name, 140) &&
+        isValidId(data.categoryId) &&
+        isNonEmptyString(data.unit, 40) &&
+        data.isActive is bool &&
+        data.approvalStatus in ['pending_technical', 'pending_admin', 'approved', 'rejected', 'inactive'] &&
+        data.allowedDepartments is list && data.allowedDepartments.size() <= 10 &&
+        (data.allowedDepartments.size() == 0 || data.allowedDepartments[0] is string) &&
+        isValidId(data.createdBy) &&
+        isNonEmptyString(data.createdByName, 120) &&
+        (!('technicalApprovedBy' in data) || isValidString(data.technicalApprovedBy, 128)) &&
+        (!('technicalApprovedByName' in data) || isValidString(data.technicalApprovedByName, 120)) &&
+        (!('adminApprovedBy' in data) || isValidString(data.adminApprovedBy, 128)) &&
+        (!('adminApprovedByName' in data) || isValidString(data.adminApprovedByName, 120)) &&
+        (!('rejectionReason' in data) || isValidString(data.rejectionReason, 300)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /products/{productId} {
+      allow get: if isActiveUser() && isValidId(productId) &&
+        (canManageCatalog() || isDept('production') || existing().createdBy == request.auth.uid || existing().approvalStatus == 'approved');
+      allow list: if isActiveUser() &&
+        (canManageCatalog() || isDept('production') || existing().createdBy == request.auth.uid || existing().approvalStatus == 'approved');
+      allow create: if isSignedIn() && isValidId(productId) && isValidProduct(incoming()) &&
+        exists(/databases/$(database)/documents/categories/$(incoming().categoryId)) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time &&
+        (
+          canManageCatalog() ||
+          (
+            isDept('factory') &&
+            incoming().approvalStatus == 'pending_technical' &&
+            incoming().isActive == false
+          )
+        );
+      allow update: if isSignedIn() && isValidId(productId) && isValidProduct(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          canManageCatalog() ||
+          (
+            isDept('production') &&
+            existing().approvalStatus == 'pending_technical' &&
+            incoming().approvalStatus in ['pending_admin', 'rejected'] &&
+            incoming().technicalApprovedBy == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['approvalStatus', 'technicalApprovedBy', 'technicalApprovedByName', 'rejectionReason', 'updatedAt'])
+          )
+        );
+    }
+
+    // Daily Sessions
+    function isValidDailySession(data) {
+      return data.keys().hasAll(['branchId', 'inventoryDate', 'status', 'openingBalanceApproved', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['branchId', 'inventoryDate', 'status', 'previousSessionId', 'openingBalanceApproved', 'closedBy', 'closedByName', 'closingDecisionNote', 'reopenedBy', 'reopenedByName', 'reopenReason', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.branchId) &&
+        isValidDateStr(data.inventoryDate) &&
+        data.status in ['open', 'closed', 'reopened'] &&
+        data.openingBalanceApproved is bool &&
+        (!('previousSessionId' in data) || isValidString(data.previousSessionId, 128)) &&
+        (!('closedBy' in data) || isValidString(data.closedBy, 128)) &&
+        (!('closedByName' in data) || isValidString(data.closedByName, 120)) &&
+        (!('closingDecisionNote' in data) || isValidString(data.closingDecisionNote, 500)) &&
+        (!('reopenedBy' in data) || isValidString(data.reopenedBy, 128)) &&
+        (!('reopenedByName' in data) || isValidString(data.reopenedByName, 120)) &&
+        (!('reopenReason' in data) || isValidString(data.reopenReason, 500)) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /dailySessions/{sessionId} {
+      allow get: if isActiveUser() && isValidId(sessionId);
+      allow list: if isActiveUser() || isAdmin();
+      allow create: if isActiveUser() && isValidId(sessionId) && isValidDailySession(incoming()) &&
+        exists(/databases/$(database)/documents/branches/$(incoming().branchId)) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().status == 'open' &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(sessionId) && isValidDailySession(incoming()) &&
+        incoming().branchId == existing().branchId &&
+        incoming().inventoryDate == existing().inventoryDate &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+    }
+
+    // Department Reports + Items Subcollection (Master Gate & Strict Dept Isolation)
+    function isValidDepartmentReport(data) {
+      return data.keys().hasAll(['sessionId', 'branchId', 'inventoryDate', 'department', 'status', 'itemCount', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'department', 'status', 'itemCount', 'createdBy', 'submittedBy', 'submittedByName', 'approvedBy', 'approvedByName', 'lastCorrectionReason', 'createdAt', 'updatedAt']) &&
+        isValidId(data.sessionId) &&
+        isValidId(data.branchId) &&
+        isValidDateStr(data.inventoryDate) &&
+        data.department in ['factory', 'production', 'sales', 'waste'] &&
+        data.status in ['draft', 'submitted', 'pending_review', 'approved', 'closed'] &&
+        isNonNegNumber(data.itemCount) &&
+        isValidId(data.createdBy) &&
+        (!('submittedBy' in data) || isValidString(data.submittedBy, 128)) &&
+        (!('submittedByName' in data) || isValidString(data.submittedByName, 120)) &&
+        (!('approvedBy' in data) || isValidString(data.approvedBy, 128)) &&
+        (!('approvedByName' in data) || isValidString(data.approvedByName, 120)) &&
+        (!('lastCorrectionReason' in data) || isValidString(data.lastCorrectionReason, 500)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    function isValidDepartmentReportItem(data) {
+      return data.keys().hasAll(['reportId', 'sessionId', 'branchId', 'inventoryDate', 'department', 'productId', 'categoryId', 'updatedBy', 'updatedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['reportId', 'sessionId', 'branchId', 'inventoryDate', 'department', 'productId', 'categoryId', 'preparedQty', 'independentProductionQty', 'salesQty', 'damagedQty', 'validRemainingQty', 'invalidRemainingQty', 'note', 'updatedBy', 'updatedByName', 'createdAt', 'updatedAt']) &&
+        isValidId(data.reportId) &&
+        isValidId(data.sessionId) &&
+        isValidId(data.branchId) &&
+        isValidDateStr(data.inventoryDate) &&
+        data.department in ['factory', 'production', 'sales', 'waste'] &&
+        isValidId(data.productId) &&
+        isValidId(data.categoryId) &&
+        (!('preparedQty' in data) || data.preparedQty == null || isNonNegNumber(data.preparedQty)) &&
+        (!('independentProductionQty' in data) || data.independentProductionQty == null || isNonNegNumber(data.independentProductionQty)) &&
+        (!('salesQty' in data) || data.salesQty == null || isNonNegNumber(data.salesQty)) &&
+        (!('damagedQty' in data) || data.damagedQty == null || isNonNegNumber(data.damagedQty)) &&
+        (!('validRemainingQty' in data) || data.validRemainingQty == null || isNonNegNumber(data.validRemainingQty)) &&
+        (!('invalidRemainingQty' in data) || data.invalidRemainingQty == null || isNonNegNumber(data.invalidRemainingQty)) &&
+        (!('note' in data) || isValidString(data.note, 300)) &&
+        isValidId(data.updatedBy) &&
+        isNonEmptyString(data.updatedByName, 120) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /departmentReports/{reportId} {
+      allow get: if isActiveUser() && isValidId(reportId) && (isAdmin() || userDepartment() == existing().department);
+      allow list: if isActiveUser() && (isAdmin() || userDepartment() == existing().department);
+      allow create: if isActiveUser() && isValidId(reportId) && isValidDepartmentReport(incoming()) &&
+        exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
+        sessionIsOpen(incoming().sessionId) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time &&
+        (isAdmin() || (userDepartment() == incoming().department && incoming().status == 'draft'));
+      allow update: if isActiveUser() && isValidId(reportId) && isValidDepartmentReport(incoming()) &&
+        incoming().sessionId == existing().sessionId &&
+        incoming().branchId == existing().branchId &&
+        incoming().inventoryDate == existing().inventoryDate &&
+        incoming().department == existing().department &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            sessionIsOpen(existing().sessionId) &&
+            userDepartment() == existing().department &&
+            existing().status == 'draft' &&
+            incoming().status in ['draft', 'submitted'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'itemCount', 'submittedBy', 'submittedByName', 'updatedAt'])
+          )
+        );
+
+      match /items/{productId} {
+        allow get: if isActiveUser() && isValidId(reportId) && isValidId(productId) &&
+          (isAdmin() || userDepartment() == get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department);
+        allow list: if isActiveUser() && (isAdmin() || userDepartment() == existing().department);
+        allow create: if isActiveUser() && isValidId(reportId) && isValidId(productId) && isValidDepartmentReportItem(incoming()) &&
+          incoming().reportId == reportId &&
+          incoming().productId == productId &&
+          incoming().updatedBy == request.auth.uid &&
+          incoming().createdAt == request.time && incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/departmentReports/$(reportId)) &&
+          (
+            isAdmin() ||
+            (
+              sessionIsOpen(incoming().sessionId) &&
+              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() &&
+              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'draft'
+            )
+          );
+        allow update: if isActiveUser() && isValidId(reportId) && isValidId(productId) && isValidDepartmentReportItem(incoming()) &&
+          incoming().reportId == existing().reportId &&
+          incoming().sessionId == existing().sessionId &&
+          incoming().department == existing().department &&
+          incoming().productId == existing().productId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedBy == request.auth.uid &&
+          incoming().updatedAt == request.time &&
+          (
+            isAdmin() ||
+            (
+              sessionIsOpen(existing().sessionId) &&
+              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() &&
+              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'draft'
+            )
+          );
+      }
+    }
+
+    // Factory Transfers + Items Subcollection
+    function isValidFactoryTransfer(data) {
+      return data.keys().hasAll(['sessionId', 'branchId', 'inventoryDate', 'transferNumber', 'status', 'totalSentQty', 'totalReceivedQty', 'totalVarianceQty', 'createdBy', 'createdByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'transferNumber', 'status', 'totalSentQty', 'totalReceivedQty', 'totalVarianceQty', 'factoryNote', 'productionNote', 'createdBy', 'createdByName', 'receivedBy', 'receivedByName', 'createdAt', 'updatedAt']) &&
+        isValidId(data.sessionId) &&
+        isValidId(data.branchId) &&
+        isValidDateStr(data.inventoryDate) &&
+        isNonEmptyString(data.transferNumber, 40) &&
+        data.status in ['pending_receipt', 'received', 'discrepancy_logged'] &&
+        isNonNegNumber(data.totalSentQty) &&
+        isNonNegNumber(data.totalReceivedQty) &&
+        (data.totalVarianceQty is int || data.totalVarianceQty is float) && data.totalVarianceQty >= -1000000 && data.totalVarianceQty <= 1000000 &&
+        (!('factoryNote' in data) || isValidString(data.factoryNote, 400)) &&
+        (!('productionNote' in data) || isValidString(data.productionNote, 400)) &&
+        isValidId(data.createdBy) &&
+        isNonEmptyString(data.createdByName, 120) &&
+        (!('receivedBy' in data) || isValidString(data.receivedBy, 128)) &&
+        (!('receivedByName' in data) || isValidString(data.receivedByName, 120)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    function isValidFactoryTransferItem(data) {
+      return data.keys().hasAll(['transferId', 'sessionId', 'productId', 'productName', 'unit', 'sentQty', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transferId', 'sessionId', 'productId', 'productName', 'unit', 'sentQty', 'receivedQty', 'varianceQty', 'note', 'createdAt', 'updatedAt']) &&
+        isValidId(data.transferId) &&
+        isValidId(data.sessionId) &&
+        isValidId(data.productId) &&
+        isNonEmptyString(data.productName, 140) &&
+        isNonEmptyString(data.unit, 40) &&
+        isNonNegNumber(data.sentQty) &&
+        (!('receivedQty' in data) || data.receivedQty == null || isNonNegNumber(data.receivedQty)) &&
+        (!('varianceQty' in data) || data.varianceQty == null || (data.varianceQty is int || data.varianceQty is float)) &&
+        (!('note' in data) || isValidString(data.note, 300)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /factoryTransfers/{transferId} {
+      allow get: if isActiveUser() && isValidId(transferId) && (isAdmin() || isDept('factory') || isDept('production'));
+      allow list: if isActiveUser() && (isAdmin() || isDept('factory') || isDept('production'));
+      allow create: if isActiveUser() && isValidId(transferId) && isValidFactoryTransfer(incoming()) &&
+        exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
+        sessionIsOpen(incoming().sessionId) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().status == 'pending_receipt' &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time &&
+        (isAdmin() || isDept('factory'));
+      allow update: if isActiveUser() && isValidId(transferId) && isValidFactoryTransfer(incoming()) &&
+        incoming().sessionId == existing().sessionId &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        sessionIsOpen(existing().sessionId) &&
+        (
+          isAdmin() ||
+          (
+            isDept('production') &&
+            existing().status == 'pending_receipt' &&
+            incoming().status in ['received', 'discrepancy_logged'] &&
+            incoming().totalSentQty == existing().totalSentQty &&
+            incoming().receivedBy == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'totalReceivedQty', 'totalVarianceQty', 'productionNote', 'receivedBy', 'receivedByName', 'updatedAt'])
+          )
+        );
+
+      match /items/{productId} {
+        allow get: if isActiveUser() && isValidId(transferId) && isValidId(productId) && (isAdmin() || isDept('factory') || isDept('production'));
+        allow list: if isActiveUser() && (isAdmin() || isDept('factory') || isDept('production'));
+        allow create: if isActiveUser() && isValidId(transferId) && isValidId(productId) && isValidFactoryTransferItem(incoming()) &&
+          incoming().transferId == transferId &&
+          incoming().productId == productId &&
+          incoming().createdAt == request.time && incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/factoryTransfers/$(transferId)) &&
+          sessionIsOpen(incoming().sessionId) &&
+          (isAdmin() || isDept('factory'));
+        allow update: if isActiveUser() && isValidId(transferId) && isValidId(productId) && isValidFactoryTransferItem(incoming()) &&
+          incoming().transferId == existing().transferId &&
+          incoming().sessionId == existing().sessionId &&
+          incoming().productId == existing().productId &&
+          incoming().sentQty == existing().sentQty &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          sessionIsOpen(existing().sessionId) &&
+          (
+            isAdmin() ||
+            (
+              isDept('production') &&
+              get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status == 'pending_receipt' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['receivedQty', 'varianceQty', 'note', 'updatedAt'])
+            )
+          );
+      }
+    }
+
+    // Independent Production Entries
+    function isValidProductionEntry(data) {
+      return data.keys().hasAll(['sessionId', 'branchId', 'inventoryDate', 'productId', 'qty', 'createdBy', 'createdByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'productId', 'qty', 'note', 'createdBy', 'createdByName', 'createdAt', 'updatedAt']) &&
+        isValidId(data.sessionId) &&
+        isValidId(data.branchId) &&
+        isValidDateStr(data.inventoryDate) &&
+        isValidId(data.productId) &&
+        isNonNegNumber(data.qty) &&
+        (!('note' in data) || isValidString(data.note, 300)) &&
+        isValidId(data.createdBy) &&
+        isNonEmptyString(data.createdByName, 120) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /productionEntries/{entryId} {
+      allow get: if isActiveUser() && isValidId(entryId) && (isAdmin() || isDept('production'));
+      allow list: if isActiveUser() && (isAdmin() || isDept('production'));
+      allow create: if isActiveUser() && isValidId(entryId) && isValidProductionEntry(incoming()) &&
+        exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
+        sessionIsOpen(incoming().sessionId) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time &&
+        (isAdmin() || isDept('production'));
+      allow update: if isAdmin() && isValidId(entryId) && isValidProductionEntry(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+    }
+
+    // Centralized Computed Product Results
+    function isValidProductResult(data) {
+      return data.keys().hasAll(['sessionId', 'branchId', 'inventoryDate', 'productId', 'productName', 'categoryId', 'categoryName', 'unit', 'openingBalance', 'factorySentQty', 'factoryReceivedQty', 'deliveryVarianceQty', 'independentProductionQty', 'totalProduction', 'totalAvailable', 'salesQty', 'damagedQty', 'validRemainingQty', 'invalidRemainingQty', 'variance', 'varianceType', 'isFinalized', 'computedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'productId', 'productName', 'categoryId', 'categoryName', 'unit', 'openingBalance', 'factorySentQty', 'factoryReceivedQty', 'deliveryVarianceQty', 'independentProductionQty', 'totalProduction', 'totalAvailable', 'salesQty', 'damagedQty', 'validRemainingQty', 'invalidRemainingQty', 'variance', 'varianceType', 'isFinalized', 'computedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.sessionId) &&
+        isValidId(data.branchId) &&
+        isValidDateStr(data.inventoryDate) &&
+        isValidId(data.productId) &&
+        isNonEmptyString(data.productName, 140) &&
+        isValidId(data.categoryId) &&
+        isNonEmptyString(data.categoryName, 100) &&
+        isNonEmptyString(data.unit, 40) &&
+        isNonNegNumber(data.openingBalance) &&
+        isNonNegNumber(data.factorySentQty) &&
+        isNonNegNumber(data.factoryReceivedQty) &&
+        (data.deliveryVarianceQty is int || data.deliveryVarianceQty is float) &&
+        isNonNegNumber(data.independentProductionQty) &&
+        isNonNegNumber(data.totalProduction) &&
+        isNonNegNumber(data.totalAvailable) &&
+        isNonNegNumber(data.salesQty) &&
+        isNonNegNumber(data.damagedQty) &&
+        isNonNegNumber(data.validRemainingQty) &&
+        isNonNegNumber(data.invalidRemainingQty) &&
+        (data.variance is int || data.variance is float) &&
+        data.varianceType in ['matched', 'deficit', 'surplus'] &&
+        data.isFinalized is bool &&
+        isValidId(data.computedBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /productResults/{resultId} {
+      allow get: if isActiveUser() && isValidId(resultId) && (isAdmin() || hasPerm('view_results') || hasPerm('view_reports'));
+      allow list: if isActiveUser() && (isAdmin() || hasPerm('view_results') || hasPerm('view_reports'));
+      allow create: if isActiveUser() && isValidId(resultId) && isValidProductResult(incoming()) &&
+        exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
+        incoming().computedBy == request.auth.uid &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time &&
+        (isAdmin() || sessionIsOpen(incoming().sessionId));
+      allow update: if isActiveUser() && isValidId(resultId) && isValidProductResult(incoming()) &&
+        incoming().sessionId == existing().sessionId &&
+        incoming().productId == existing().productId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().computedBy == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        (isAdmin() || (sessionIsOpen(existing().sessionId) && existing().isFinalized == false));
+    }
+
+    // Approvals & Correction Requests
+    function isValidApprovalRequest(data) {
+      return data.keys().hasAll(['type', 'targetCollection', 'targetId', 'status', 'reason', 'requestedBy', 'requestedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['type', 'sessionId', 'inventoryDate', 'targetCollection', 'targetId', 'productId', 'department', 'status', 'reason', 'fieldKey', 'oldValue', 'newValue', 'requestedBy', 'requestedByName', 'reviewedBy', 'reviewedByName', 'reviewNote', 'createdAt', 'updatedAt']) &&
+        data.type in ['product_technical', 'product_admin', 'report_correction', 'session_reopen', 'delivery_variance_settlement'] &&
+        (!('sessionId' in data) || isValidString(data.sessionId, 128)) &&
+        (!('inventoryDate' in data) || isValidString(data.inventoryDate, 10)) &&
+        isNonEmptyString(data.targetCollection, 64) &&
+        isNonEmptyString(data.targetId, 128) &&
+        (!('productId' in data) || isValidString(data.productId, 64)) &&
+        (!('department' in data) || isValidString(data.department, 32)) &&
+        data.status in ['pending', 'approved', 'rejected'] &&
+        isNonEmptyString(data.reason, 500) &&
+        (!('fieldKey' in data) || isValidString(data.fieldKey, 64)) &&
+        (!('oldValue' in data) || data.oldValue == null || isNonNegNumber(data.oldValue)) &&
+        (!('newValue' in data) || data.newValue == null || isNonNegNumber(data.newValue)) &&
+        isValidId(data.requestedBy) &&
+        isNonEmptyString(data.requestedByName, 120) &&
+        (!('reviewedBy' in data) || isValidString(data.reviewedBy, 128)) &&
+        (!('reviewedByName' in data) || isValidString(data.reviewedByName, 120)) &&
+        (!('reviewNote' in data) || isValidString(data.reviewNote, 500)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+    match /approvals/{approvalId} {
+      allow get: if isActiveUser() && isValidId(approvalId) && (isAdmin() || existing().requestedBy == request.auth.uid || isDept('production'));
+      allow list: if isActiveUser() && (isAdmin() || isDept('production') || existing().requestedBy == request.auth.uid);
+      allow create: if isActiveUser() && isValidId(approvalId) && isValidApprovalRequest(incoming()) &&
+        incoming().requestedBy == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isActiveUser() && isValidId(approvalId) && isValidApprovalRequest(incoming()) &&
+        incoming().requestedBy == existing().requestedBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            isDept('production') &&
+            existing().type == 'product_technical' &&
+            existing().status == 'pending' &&
+            incoming().status in ['approved', 'rejected'] &&
+            incoming().reviewedBy == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewedBy', 'reviewedByName', 'reviewNote', 'updatedAt'])
+          )
+        );
+    }
+
+    // Audit Logs (Strictly Append-Only)
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['actorUid', 'actorName', 'actorRole', 'action', 'targetCollection', 'targetId', 'createdAt']) &&
+        data.keys().hasOnly(['sessionId', 'inventoryDate', 'branchId', 'department', 'actorUid', 'actorName', 'actorRole', 'action', 'targetCollection', 'targetId', 'oldValueSummary', 'newValueSummary', 'reason', 'createdAt']) &&
+        (!('sessionId' in data) || isValidString(data.sessionId, 128)) &&
+        (!('inventoryDate' in data) || isValidString(data.inventoryDate, 10)) &&
+        (!('branchId' in data) || isValidString(data.branchId, 64)) &&
+        (!('department' in data) || isValidString(data.department, 32)) &&
+        isValidId(data.actorUid) &&
+        isNonEmptyString(data.actorName, 120) &&
+        isNonEmptyString(data.actorRole, 40) &&
+        isNonEmptyString(data.action, 80) &&
+        isNonEmptyString(data.targetCollection, 64) &&
+        isNonEmptyString(data.targetId, 128) &&
+        (!('oldValueSummary' in data) || isValidString(data.oldValueSummary, 400)) &&
+        (!('newValueSummary' in data) || isValidString(data.newValueSummary, 400)) &&
+        (!('reason' in data) || isValidString(data.reason, 400)) &&
+        data.createdAt is timestamp;
+    }
+    match /auditLogs/{logId} {
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && isValidId(logId) && isValidAuditLog(incoming()) &&
+        incoming().actorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+    }
+  }
+}

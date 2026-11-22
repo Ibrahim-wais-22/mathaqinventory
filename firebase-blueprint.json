@@ -1,0 +1,401 @@
+{
+  "entities": {
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Authoritative executive management role marker used by security rules.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["ceo", "branch_manager"] },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "role", "email", "createdAt"]
+    },
+    "Branch": {
+      "title": "Branch",
+      "description": "Operational restaurant branch.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 120 },
+        "code": { "type": "string", "maxLength": 32, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "timezone": { "type": "string", "maxLength": 64 },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "code", "timezone", "isActive", "createdAt", "updatedAt"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Independent employee account with department, role, status, and granular permissions.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "employeeNumber": { "type": "string", "maxLength": 40 },
+        "username": { "type": "string", "maxLength": 80 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "department": { "type": "string", "enum": ["management", "factory", "production", "sales", "waste"] },
+        "role": { "type": "string", "enum": ["ceo", "branch_manager", "factory_staff", "production_staff", "sales_staff", "waste_staff", "pending"] },
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "status": { "type": "string", "enum": ["active", "suspended", "pending_activation"] },
+        "permissions": { "type": "array", "maxLength": 30 },
+        "inviteId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "employeeNumber", "username", "fullName", "email", "department", "role", "branchId", "status", "permissions", "createdAt", "updatedAt"]
+    },
+    "UserInvite": {
+      "title": "UserInvite",
+      "description": "Pre-registered employee invitation matched by normalized email upon Google login.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "employeeNumber": { "type": "string", "maxLength": 40 },
+        "username": { "type": "string", "maxLength": 80 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "department": { "type": "string", "enum": ["management", "factory", "production", "sales", "waste"] },
+        "role": { "type": "string", "enum": ["ceo", "branch_manager", "factory_staff", "production_staff", "sales_staff", "waste_staff"] },
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "permissions": { "type": "array", "maxLength": 30 },
+        "claimed": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "employeeNumber", "username", "fullName", "department", "role", "branchId", "status", "permissions", "claimed", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Dynamic finished-goods category.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "sortOrder": { "type": "number" },
+        "isActive": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "sortOrder", "isActive", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Ready-for-sale menu product with 3-stage approval lifecycle.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 140 },
+        "categoryId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "unit": { "type": "string", "maxLength": 40 },
+        "isActive": { "type": "boolean" },
+        "approvalStatus": { "type": "string", "enum": ["pending_technical", "pending_admin", "approved", "rejected", "inactive"] },
+        "allowedDepartments": { "type": "array", "maxLength": 10 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "technicalApprovedBy": { "type": "string", "maxLength": 128 },
+        "technicalApprovedByName": { "type": "string", "maxLength": 120 },
+        "adminApprovedBy": { "type": "string", "maxLength": 128 },
+        "adminApprovedByName": { "type": "string", "maxLength": 120 },
+        "rejectionReason": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "categoryId", "unit", "isActive", "approvalStatus", "allowedDepartments", "createdBy", "createdByName", "createdAt", "updatedAt"]
+    },
+    "DailySession": {
+      "title": "DailySession",
+      "description": "Daily inventory session keyed by branch and Asia/Aden date.",
+      "type": "object",
+      "properties": {
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "inventoryDate": { "type": "string", "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "status": { "type": "string", "enum": ["open", "closed", "reopened"] },
+        "previousSessionId": { "type": "string", "maxLength": 128 },
+        "openingBalanceApproved": { "type": "boolean" },
+        "closedBy": { "type": "string", "maxLength": 128 },
+        "closedByName": { "type": "string", "maxLength": 120 },
+        "closingDecisionNote": { "type": "string", "maxLength": 500 },
+        "reopenedBy": { "type": "string", "maxLength": 128 },
+        "reopenedByName": { "type": "string", "maxLength": 120 },
+        "reopenReason": { "type": "string", "maxLength": 500 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["branchId", "inventoryDate", "status", "openingBalanceApproved", "createdBy", "createdAt", "updatedAt"]
+    },
+    "DepartmentReport": {
+      "title": "DepartmentReport",
+      "description": "Header document for each department's daily report.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "inventoryDate": { "type": "string", "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "department": { "type": "string", "enum": ["factory", "production", "sales", "waste"] },
+        "status": { "type": "string", "enum": ["draft", "submitted", "pending_review", "approved", "closed"] },
+        "itemCount": { "type": "number" },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "submittedBy": { "type": "string", "maxLength": 128 },
+        "submittedByName": { "type": "string", "maxLength": 120 },
+        "approvedBy": { "type": "string", "maxLength": 128 },
+        "approvedByName": { "type": "string", "maxLength": 120 },
+        "lastCorrectionReason": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "branchId", "inventoryDate", "department", "status", "itemCount", "createdBy", "createdAt", "updatedAt"]
+    },
+    "DepartmentReportItem": {
+      "title": "DepartmentReportItem",
+      "description": "Per-product line item inside a department report subcollection.",
+      "type": "object",
+      "properties": {
+        "reportId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sessionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "inventoryDate": { "type": "string", "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "department": { "type": "string", "enum": ["factory", "production", "sales", "waste"] },
+        "productId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "categoryId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "preparedQty": { "type": "number" },
+        "independentProductionQty": { "type": "number" },
+        "salesQty": { "type": "number" },
+        "damagedQty": { "type": "number" },
+        "validRemainingQty": { "type": "number" },
+        "invalidRemainingQty": { "type": "number" },
+        "note": { "type": "string", "maxLength": 300 },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedByName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reportId", "sessionId", "branchId", "inventoryDate", "department", "productId", "categoryId", "updatedBy", "updatedByName", "createdAt", "updatedAt"]
+    },
+    "FactoryTransfer": {
+      "title": "FactoryTransfer",
+      "description": "Factory-to-production dispatch batch header.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "inventoryDate": { "type": "string", "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transferNumber": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["pending_receipt", "received", "discrepancy_logged"] },
+        "totalSentQty": { "type": "number" },
+        "totalReceivedQty": { "type": "number" },
+        "totalVarianceQty": { "type": "number" },
+        "factoryNote": { "type": "string", "maxLength": 400 },
+        "productionNote": { "type": "string", "maxLength": 400 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "receivedBy": { "type": "string", "maxLength": 128 },
+        "receivedByName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "branchId", "inventoryDate", "transferNumber", "status", "totalSentQty", "totalReceivedQty", "totalVarianceQty", "createdBy", "createdByName", "createdAt", "updatedAt"]
+    },
+    "FactoryTransferItem": {
+      "title": "FactoryTransferItem",
+      "description": "Individual product line item inside a factory transfer.",
+      "type": "object",
+      "properties": {
+        "transferId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sessionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productName": { "type": "string", "maxLength": 140 },
+        "unit": { "type": "string", "maxLength": 40 },
+        "sentQty": { "type": "number" },
+        "receivedQty": { "type": "number" },
+        "varianceQty": { "type": "number" },
+        "note": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transferId", "sessionId", "productId", "productName", "unit", "sentQty", "createdAt", "updatedAt"]
+    },
+    "ProductionEntry": {
+      "title": "ProductionEntry",
+      "description": "Independent production entry recorded directly by Production department.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "inventoryDate": { "type": "string", "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "productId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "qty": { "type": "number" },
+        "note": { "type": "string", "maxLength": 300 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "branchId", "inventoryDate", "productId", "qty", "createdBy", "createdByName", "createdAt", "updatedAt"]
+    },
+    "ProductResult": {
+      "title": "ProductResult",
+      "description": "Centralized daily inventory calculation result per product.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "inventoryDate": { "type": "string", "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "productId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productName": { "type": "string", "maxLength": 140 },
+        "categoryId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "categoryName": { "type": "string", "maxLength": 100 },
+        "unit": { "type": "string", "maxLength": 40 },
+        "openingBalance": { "type": "number" },
+        "factorySentQty": { "type": "number" },
+        "factoryReceivedQty": { "type": "number" },
+        "deliveryVarianceQty": { "type": "number" },
+        "independentProductionQty": { "type": "number" },
+        "totalProduction": { "type": "number" },
+        "totalAvailable": { "type": "number" },
+        "salesQty": { "type": "number" },
+        "damagedQty": { "type": "number" },
+        "validRemainingQty": { "type": "number" },
+        "invalidRemainingQty": { "type": "number" },
+        "variance": { "type": "number" },
+        "varianceType": { "type": "string", "enum": ["matched", "deficit", "surplus"] },
+        "isFinalized": { "type": "boolean" },
+        "computedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "branchId", "inventoryDate", "productId", "productName", "categoryId", "categoryName", "unit", "openingBalance", "factorySentQty", "factoryReceivedQty", "deliveryVarianceQty", "independentProductionQty", "totalProduction", "totalAvailable", "salesQty", "damagedQty", "validRemainingQty", "invalidRemainingQty", "variance", "varianceType", "isFinalized", "computedBy", "createdAt", "updatedAt"]
+    },
+    "ApprovalRequest": {
+      "title": "ApprovalRequest",
+      "description": "Approval and post-submission correction request with old/new audit trail.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["product_technical", "product_admin", "report_correction", "session_reopen", "delivery_variance_settlement"] },
+        "sessionId": { "type": "string", "maxLength": 128 },
+        "inventoryDate": { "type": "string", "maxLength": 10 },
+        "targetCollection": { "type": "string", "maxLength": 64 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 64 },
+        "department": { "type": "string", "maxLength": 32 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "reason": { "type": "string", "maxLength": 500 },
+        "fieldKey": { "type": "string", "maxLength": 64 },
+        "oldValue": { "type": "number" },
+        "newValue": { "type": "number" },
+        "requestedBy": { "type": "string", "maxLength": 128 },
+        "requestedByName": { "type": "string", "maxLength": 120 },
+        "reviewedBy": { "type": "string", "maxLength": 128 },
+        "reviewedByName": { "type": "string", "maxLength": 120 },
+        "reviewNote": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "targetCollection", "targetId", "status", "reason", "requestedBy", "requestedByName", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable audit trail record for all operational and administrative actions.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128 },
+        "inventoryDate": { "type": "string", "maxLength": 10 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "department": { "type": "string", "maxLength": 32 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "actorRole": { "type": "string", "maxLength": 40 },
+        "action": { "type": "string", "maxLength": 80 },
+        "targetCollection": { "type": "string", "maxLength": 64 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "oldValueSummary": { "type": "string", "maxLength": 400 },
+        "newValueSummary": { "type": "string", "maxLength": 400 },
+        "reason": { "type": "string", "maxLength": 400 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorUid", "actorName", "actorRole", "action", "targetCollection", "targetId", "createdAt"]
+    },
+    "SystemSetting": {
+      "title": "SystemSetting",
+      "description": "Global system configuration and initial seeding flag.",
+      "type": "object",
+      "properties": {
+        "timezone": { "type": "string", "maxLength": 64 },
+        "activeBranchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "seeded": { "type": "boolean" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["timezone", "activeBranchId", "seeded", "updatedBy", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Authoritative executive administrator records."
+    },
+    "/branches/{branchId}": {
+      "schema": { "$ref": "#/entities/Branch" },
+      "description": "Restaurant branches."
+    },
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Employee user accounts and RBAC assignments."
+    },
+    "/userInvites/{inviteId}": {
+      "schema": { "$ref": "#/entities/UserInvite" },
+      "description": "Pre-created employee invitations matched on first Google login."
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Product categories."
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Ready-for-sale menu items."
+    },
+    "/dailySessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/DailySession" },
+      "description": "Daily inventory sessions."
+    },
+    "/departmentReports/{reportId}": {
+      "schema": { "$ref": "#/entities/DepartmentReport" },
+      "description": "Department daily report headers."
+    },
+    "/departmentReports/{reportId}/items/{productId}": {
+      "schema": { "$ref": "#/entities/DepartmentReportItem" },
+      "description": "Product-level entries within a department report."
+    },
+    "/factoryTransfers/{transferId}": {
+      "schema": { "$ref": "#/entities/FactoryTransfer" },
+      "description": "Factory-to-production dispatch batches."
+    },
+    "/factoryTransfers/{transferId}/items/{productId}": {
+      "schema": { "$ref": "#/entities/FactoryTransferItem" },
+      "description": "Product quantities inside a factory transfer."
+    },
+    "/productionEntries/{entryId}": {
+      "schema": { "$ref": "#/entities/ProductionEntry" },
+      "description": "Independent production logs."
+    },
+    "/productResults/{resultId}": {
+      "schema": { "$ref": "#/entities/ProductResult" },
+      "description": "Centralized daily inventory results."
+    },
+    "/approvals/{approvalId}": {
+      "schema": { "$ref": "#/entities/ApprovalRequest" },
+      "description": "Pending and resolved approval requests."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable operational and administrative audit logs."
+    },
+    "/systemSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/SystemSetting" },
+      "description": "System configuration documents."
+    }
+  }
+}
