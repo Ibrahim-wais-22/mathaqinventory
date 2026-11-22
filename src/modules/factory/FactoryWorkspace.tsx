@@ -53,6 +53,7 @@ export const FactoryWorkspace: React.FC = () => {
     refreshSession,
     categories,
     products,
+    isDeptQtyReadOnly,
   } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
@@ -99,15 +100,17 @@ export const FactoryWorkspace: React.FC = () => {
     setTransfers([]);
     if (!account || !currentSession) return;
     let active = true;
-    ensureDepartmentReport(account, currentSession, 'factory')
-      .then((rep) => {
-        if (active) setReport(rep);
-      })
-      .catch((err) => {
-        if (active) {
-          setFeedback({ type: 'error', text: formatActionError(err, 'تعذر تحميل تقرير المعمل.') });
-        }
-      });
+    if (!isDeptQtyReadOnly) {
+      ensureDepartmentReport(account, currentSession, 'factory')
+        .then((rep) => {
+          if (active) setReport(rep);
+        })
+        .catch((err) => {
+          if (active) {
+            setFeedback({ type: 'error', text: formatActionError(err, 'تعذر تحميل تقرير المعمل.') });
+          }
+        });
+    }
 
     const reportId = `${currentSession.id}_factory`;
     const unsubRep = onSnapshot(
@@ -437,16 +440,24 @@ export const FactoryWorkspace: React.FC = () => {
               icon={report.status === 'draft' ? 'clock' : 'check'}
             />
           )}
-          <button
-            type="button"
-            onClick={() => setNewProdModal(true)}
-            className="min-h-[42px] inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer"
-          >
-            <PackagePlus className="h-4 w-4 text-[#D91B23]" />
-            <span>طلب صنف جديد</span>
-          </button>
+          {!isDeptQtyReadOnly && (
+            <button
+              type="button"
+              onClick={() => setNewProdModal(true)}
+              className="min-h-[42px] inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+            >
+              <PackagePlus className="h-4 w-4 text-[#D91B23]" />
+              <span>طلب صنف جديد</span>
+            </button>
+          )}
         </div>
       </div>
+
+      {isDeptQtyReadOnly && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-900">
+          وضع الاطلاع فقط — صلاحيات إضافة أو تعديل الكميات في المعمل مقتصرة على موظفي المعمل ومخفية عن المدير التنفيذي ومدير الفرع.
+        </div>
+      )}
 
       {sessionError && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 flex flex-wrap items-center justify-between gap-2">
@@ -549,64 +560,88 @@ export const FactoryWorkspace: React.FC = () => {
             <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
               <div>
                 <h3 className="text-base font-bold text-zinc-900 font-display">
-                  إنشاء توريد جديد إلى الإنتاج
+                  {isDeptQtyReadOnly ? 'قائمة أصناف المعمل المعتمدة (اطلاع فقط)' : 'إنشاء توريد جديد إلى الإنتاج'}
                 </h3>
                 <p className="text-xs text-zinc-500">
-                  حدد الكمية المرسلة لكل صنف ليصل إشعار الاستلام لقسم الإنتاج فوراً
+                  {isDeptQtyReadOnly
+                    ? 'استعراض أصناف المعمل ووحداتها؛ التوريدات تُنشأ من حساب موظف المعمل فقط'
+                    : 'حدد الكمية المرسلة لكل صنف ليصل إشعار الاستلام لقسم الإنتاج فوراً'}
                 </p>
               </div>
-              <span className="text-xs font-semibold text-zinc-700 tabular-nums">
-                الإجمالي: {totalDispatchUnits} وحدة
-              </span>
+              {!isDeptQtyReadOnly && (
+                <span className="text-xs font-semibold text-zinc-700 tabular-nums">
+                  الإجمالي: {totalDispatchUnits} وحدة
+                </span>
+              )}
             </div>
 
-            <div className="divide-y divide-zinc-100 max-h-[460px] overflow-y-auto">
-              {filteredProducts.map((prod) => (
-                <div
-                  key={prod.id}
-                  className="px-5 py-3 flex items-center justify-between gap-4 hover:bg-zinc-50/70"
+            <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+              <table className="w-full text-right">
+                <thead className="bg-zinc-50 border-b border-zinc-200 text-xs text-zinc-500 sticky top-0 z-10">
+                  <tr>
+                    <th className="px-5 py-3 font-semibold">الصنف</th>
+                    <th className="px-4 py-3 font-semibold">المجموعة</th>
+                    <th className="px-4 py-3 font-semibold">الوحدة</th>
+                    {!isDeptQtyReadOnly && (
+                      <th className="px-4 py-3 font-semibold text-center">الكمية المرسلة</th>
+                    )}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100 text-sm">
+                  {filteredProducts.map((prod) => (
+                    <tr key={prod.id} className="hover:bg-zinc-50/70">
+                      <td className="px-5 py-3 font-semibold text-zinc-900">{prod.name}</td>
+                      <td className="px-4 py-3 text-zinc-600">
+                        {categoryMap.get(prod.categoryId) || '—'}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs font-semibold text-zinc-700">
+                          {prod.unit}
+                        </span>
+                      </td>
+                      {!isDeptQtyReadOnly && (
+                        <td className="px-4 py-3 text-center">
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            disabled={isSessionClosed}
+                            value={transferQtyMap[prod.id] || ''}
+                            onChange={(e) =>
+                              setTransferQtyMap((prev) => ({ ...prev, [prod.id]: e.target.value }))
+                            }
+                            placeholder="0"
+                            className="w-28 min-h-[40px] rounded-xl border border-zinc-200 px-3 text-center text-sm font-semibold tabular-nums focus:outline-none focus:border-[#D91B23] disabled:bg-zinc-100"
+                          />
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {!isDeptQtyReadOnly && (
+              <div className="p-5 border-t border-zinc-100 bg-zinc-50/50 space-y-3">
+                <input
+                  type="text"
+                  value={transferNote}
+                  onChange={(e) => setTransferNote(e.target.value)}
+                  disabled={isSessionClosed}
+                  placeholder="ملاحظة التوريد (اختياري)..."
+                  className="w-full min-h-[42px] rounded-xl border border-zinc-200 bg-white px-4 text-sm focus:outline-none focus:border-[#D91B23]"
+                />
+                <button
+                  type="button"
+                  disabled={isSessionClosed || totalDispatchUnits <= 0 || busy}
+                  onClick={() => setConfirmTransferOpen(true)}
+                  className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#D91B23] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#B9141B] transition-colors cursor-pointer disabled:opacity-50"
                 >
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold text-zinc-900 truncate">{prod.name}</div>
-                    <div className="text-xs text-zinc-500">
-                      {categoryMap.get(prod.categoryId) || '—'} · الوحدة: {prod.unit}
-                    </div>
-                  </div>
-                  <input
-                    type="number"
-                    min="0"
-                    step="any"
-                    disabled={isSessionClosed}
-                    value={transferQtyMap[prod.id] || ''}
-                    onChange={(e) =>
-                      setTransferQtyMap((prev) => ({ ...prev, [prod.id]: e.target.value }))
-                    }
-                    placeholder="0"
-                    className="w-28 min-h-[42px] rounded-xl border border-zinc-200 px-3 text-center text-sm font-semibold tabular-nums focus:outline-none focus:border-[#D91B23] disabled:bg-zinc-100"
-                  />
-                </div>
-              ))}
-            </div>
-
-            <div className="p-5 border-t border-zinc-100 bg-zinc-50/50 space-y-3">
-              <input
-                type="text"
-                value={transferNote}
-                onChange={(e) => setTransferNote(e.target.value)}
-                disabled={isSessionClosed}
-                placeholder="ملاحظة التوريد (اختياري)..."
-                className="w-full min-h-[42px] rounded-xl border border-zinc-200 bg-white px-4 text-sm focus:outline-none focus:border-[#D91B23]"
-              />
-              <button
-                type="button"
-                disabled={isSessionClosed || totalDispatchUnits <= 0 || busy}
-                onClick={() => setConfirmTransferOpen(true)}
-                className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#D91B23] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#B9141B] transition-colors cursor-pointer disabled:opacity-50"
-              >
-                <Truck className="h-4 w-4" />
-                <span>إرسال التوريد إلى قسم الإنتاج</span>
-              </button>
-            </div>
+                  <Truck className="h-4 w-4" />
+                  <span>إرسال التوريد إلى قسم الإنتاج</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Transfer Status History */}
@@ -680,7 +715,7 @@ export const FactoryWorkspace: React.FC = () => {
                 اترك الحقل فارغاً للأصناف التي لم تجهز اليوم، أو أدخل 0 إذا كانت الكمية صفراً فعلياً
               </p>
             </div>
-            {!isSubmitted && !isSessionClosed && (
+            {!isDeptQtyReadOnly && !isSubmitted && !isSessionClosed && (
               <div className="flex flex-wrap items-center gap-2">
                 {transfers.length > 0 && (
                   <button
@@ -723,7 +758,7 @@ export const FactoryWorkspace: React.FC = () => {
                   <th className="px-4 py-3 font-semibold">المجموعة</th>
                   <th className="px-4 py-3 font-semibold">الوحدة</th>
                   <th className="px-4 py-3 font-semibold">الكمية المجهزة</th>
-                  {isSubmitted && !isSessionClosed && (
+                  {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                     <th className="px-4 py-3 font-semibold">تصحيح</th>
                   )}
                 </tr>
@@ -737,20 +772,28 @@ export const FactoryWorkspace: React.FC = () => {
                     </td>
                     <td className="px-4 py-3 text-zinc-600">{prod.unit}</td>
                     <td className="px-4 py-3">
-                      <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        disabled={isSubmitted || isSessionClosed}
-                        value={preparedMap[prod.id] ?? ''}
-                        onChange={(e) =>
-                          setPreparedMap((prev) => ({ ...prev, [prod.id]: e.target.value }))
-                        }
-                        placeholder="لم يُدخل"
-                        className="w-32 min-h-[40px] rounded-xl border border-zinc-200 px-3 text-center font-semibold tabular-nums focus:outline-none focus:border-[#D91B23] disabled:bg-zinc-100"
-                      />
+                      {isDeptQtyReadOnly ? (
+                        <span className="inline-block min-w-[64px] text-center font-semibold tabular-nums text-zinc-800">
+                          {preparedMap[prod.id] !== undefined && preparedMap[prod.id] !== ''
+                            ? preparedMap[prod.id]
+                            : '—'}
+                        </span>
+                      ) : (
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          disabled={isSubmitted || isSessionClosed}
+                          value={preparedMap[prod.id] ?? ''}
+                          onChange={(e) =>
+                            setPreparedMap((prev) => ({ ...prev, [prod.id]: e.target.value }))
+                          }
+                          placeholder="لم يُدخل"
+                          className="w-32 min-h-[40px] rounded-xl border border-zinc-200 px-3 text-center font-semibold tabular-nums focus:outline-none focus:border-[#D91B23] disabled:bg-zinc-100"
+                        />
+                      )}
                     </td>
-                    {isSubmitted && !isSessionClosed && (
+                    {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                       <td className="px-4 py-3">
                         <button
                           type="button"
@@ -780,49 +823,74 @@ export const FactoryWorkspace: React.FC = () => {
             <h3 className="text-base font-bold text-zinc-900 font-display">
               طلبات اعتماد الأصناف المرسلة من المعمل
             </h3>
-            <button
-              type="button"
-              onClick={() => setNewProdModal(true)}
-              className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl bg-[#18181B] px-3.5 py-1.5 text-xs font-semibold text-white cursor-pointer"
-            >
-              <Plus className="h-4 w-4" />
-              <span>صنف جديد</span>
-            </button>
+            {!isDeptQtyReadOnly && (
+              <button
+                type="button"
+                onClick={() => setNewProdModal(true)}
+                className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl bg-[#18181B] px-3.5 py-1.5 text-xs font-semibold text-white cursor-pointer"
+              >
+                <Plus className="h-4 w-4" />
+                <span>صنف جديد</span>
+              </button>
+            )}
           </div>
           {proposedProducts.length === 0 ? (
             <div className="p-8 text-center text-sm text-zinc-500">
               لم تقم باقتراح أي أصناف جديدة بعد.
             </div>
           ) : (
-            <div className="divide-y divide-zinc-100">
-              {proposedProducts.map((p) => (
-                <div key={p.id} className="p-4 flex items-center justify-between gap-4">
-                  <div>
-                    <div className="text-sm font-bold text-zinc-900">{p.name}</div>
-                    <div className="text-xs text-zinc-500">
-                      {categoryMap.get(p.categoryId) || '—'} · الوحدة: {p.unit}
-                      {p.rejectionReason ? ` · سبب الرفض: ${p.rejectionReason}` : ''}
-                    </div>
-                  </div>
-                  <StatusBadge
-                    label={PRODUCT_APPROVAL_LABELS[p.approvalStatus]}
-                    tone={
-                      p.approvalStatus === 'approved'
-                        ? 'success'
-                        : p.approvalStatus === 'rejected'
-                        ? 'danger'
-                        : 'warning'
-                    }
-                    icon={
-                      p.approvalStatus === 'approved'
-                        ? 'check'
-                        : p.approvalStatus === 'rejected'
-                        ? 'error'
-                        : 'clock'
-                    }
-                  />
-                </div>
-              ))}
+            <div className="overflow-x-auto">
+              <table className="w-full text-right">
+                <thead className="bg-zinc-50 border-b border-zinc-200 text-xs text-zinc-500">
+                  <tr>
+                    <th className="px-5 py-3 font-semibold">الصنف</th>
+                    <th className="px-4 py-3 font-semibold">المجموعة</th>
+                    <th className="px-4 py-3 font-semibold">الوحدة</th>
+                    <th className="px-4 py-3 font-semibold">الحالة</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100 text-sm">
+                  {proposedProducts.map((p) => (
+                    <tr key={p.id} className="hover:bg-zinc-50/70">
+                      <td className="px-5 py-3">
+                        <div className="font-bold text-zinc-900">{p.name}</div>
+                        {p.rejectionReason && (
+                          <div className="text-xs text-red-600 mt-0.5">
+                            سبب الرفض: {p.rejectionReason}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-zinc-600">
+                        {categoryMap.get(p.categoryId) || '—'}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs font-semibold text-zinc-700">
+                          {p.unit}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <StatusBadge
+                          label={PRODUCT_APPROVAL_LABELS[p.approvalStatus]}
+                          tone={
+                            p.approvalStatus === 'approved'
+                              ? 'success'
+                              : p.approvalStatus === 'rejected'
+                              ? 'danger'
+                              : 'warning'
+                          }
+                          icon={
+                            p.approvalStatus === 'approved'
+                              ? 'check'
+                              : p.approvalStatus === 'rejected'
+                              ? 'error'
+                              : 'clock'
+                          }
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>

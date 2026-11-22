@@ -6,6 +6,7 @@ import {
   ChefHat,
   Factory,
   History,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Package,
@@ -21,6 +22,7 @@ import {
 } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { BrandLogo } from '../../components/common/BrandLogo';
+import { ChangePasswordModal } from '../../components/common/ChangePasswordModal';
 import { OfflineIndicator } from '../../components/common/OfflineIndicator';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
 import { RecentActivityDrawer } from '../../components/common/RecentActivityDrawer';
@@ -47,6 +49,7 @@ export const AppShell: React.FC<{
     logout,
   } = useFirebase();
   const [activityOpen, setActivityOpen] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
 
   const navItems: NavItem[] = useMemo(() => {
     if (!account) return [];
@@ -145,6 +148,17 @@ export const AppShell: React.FC<{
 
             <button
               type="button"
+              onClick={() => setChangePasswordOpen(true)}
+              className="min-h-[36px] inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-2.5 sm:px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              aria-label="تغيير كلمة المرور"
+              title="تغيير كلمة المرور"
+            >
+              <KeyRound className="h-4 w-4 text-zinc-600 shrink-0" />
+              <span className="hidden md:inline">كلمة المرور</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => void logout()}
               className="min-h-[36px] inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-2.5 sm:px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
               aria-label="تسجيل الخروج"
@@ -199,6 +213,11 @@ export const AppShell: React.FC<{
           onOpenFullAudit={() => onSelectTab('approvals')}
         />
       )}
+
+      <ChangePasswordModal
+        open={changePasswordOpen}
+        onClose={() => setChangePasswordOpen(false)}
+      />
     </div>
   );
 };

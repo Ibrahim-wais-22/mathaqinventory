@@ -59,6 +59,7 @@ export const ProductionWorkspace: React.FC = () => {
     categories,
     products,
     hasPermission,
+    isDeptQtyReadOnly,
   } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
@@ -126,15 +127,17 @@ export const ProductionWorkspace: React.FC = () => {
     if (!account || !currentSession) return;
     let active = true;
 
-    ensureDepartmentReport(account, currentSession, 'production')
-      .then((rep) => {
-        if (active) setReport(rep);
-      })
-      .catch((err) => {
-        if (active) {
-          setFeedback({ type: 'error', text: formatActionError(err, 'تعذر تحميل تقرير الإنتاج.') });
-        }
-      });
+    if (!isDeptQtyReadOnly) {
+      ensureDepartmentReport(account, currentSession, 'production')
+        .then((rep) => {
+          if (active) setReport(rep);
+        })
+        .catch((err) => {
+          if (active) {
+            setFeedback({ type: 'error', text: formatActionError(err, 'تعذر تحميل تقرير الإنتاج.') });
+          }
+        });
+    }
 
     const reportId = `${currentSession.id}_production`;
     const unsubRep = onSnapshot(
@@ -518,7 +521,7 @@ export const ProductionWorkspace: React.FC = () => {
             tone={pendingCount > 0 ? 'warning' : 'success'}
             icon={pendingCount > 0 ? 'clock' : 'check'}
           />
-          {!isSubmitted && !isSessionClosed && (
+          {!isDeptQtyReadOnly && !isSubmitted && !isSessionClosed && (
             <button
               type="button"
               disabled={busy || !currentSession || pendingCount > 0}
@@ -536,6 +539,12 @@ export const ProductionWorkspace: React.FC = () => {
           )}
         </div>
       </div>
+
+      {isDeptQtyReadOnly && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-900">
+          وضع الاطلاع فقط — صلاحيات استلام الكميات أو إضافة الإنتاج المستقل مقتصرة على موظفي الإنتاج ومخفية عن المدير التنفيذي ومدير الفرع.
+        </div>
+      )}
 
       {sessionError && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 flex flex-wrap items-center justify-between gap-2">
@@ -719,22 +728,30 @@ export const ProductionWorkspace: React.FC = () => {
                                 {item.sentQty}
                               </td>
                               <td className="px-3 py-3">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="any"
-                                  disabled={
-                                    selectedTransfer.status !== 'pending_receipt' || isSessionClosed
-                                  }
-                                  value={receivedQtyMap[item.productId] ?? ''}
-                                  onChange={(e) =>
-                                    setReceivedQtyMap((prev) => ({
-                                      ...prev,
-                                      [item.productId]: e.target.value,
-                                    }))
-                                  }
-                                  className="w-24 min-h-[40px] rounded-xl border border-zinc-200 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
-                                />
+                                {isDeptQtyReadOnly ? (
+                                  <span className="font-semibold tabular-nums text-zinc-800">
+                                    {selectedTransfer.status === 'pending_receipt'
+                                      ? 'بانتظار الاستلام'
+                                      : item.receivedQty ?? '—'}
+                                  </span>
+                                ) : (
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="any"
+                                    disabled={
+                                      selectedTransfer.status !== 'pending_receipt' || isSessionClosed
+                                    }
+                                    value={receivedQtyMap[item.productId] ?? ''}
+                                    onChange={(e) =>
+                                      setReceivedQtyMap((prev) => ({
+                                        ...prev,
+                                        [item.productId]: e.target.value,
+                                      }))
+                                    }
+                                    className="w-24 min-h-[40px] rounded-xl border border-zinc-200 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
+                                  />
+                                )}
                               </td>
                               <td
                                 className={`px-3 py-3 font-bold tabular-nums ${
@@ -744,21 +761,25 @@ export const ProductionWorkspace: React.FC = () => {
                                 {diff}
                               </td>
                               <td className="px-4 py-3">
-                                <input
-                                  type="text"
-                                  disabled={
-                                    selectedTransfer.status !== 'pending_receipt' || isSessionClosed
-                                  }
-                                  value={itemNoteMap[item.productId] ?? ''}
-                                  onChange={(e) =>
-                                    setItemNoteMap((prev) => ({
-                                      ...prev,
-                                      [item.productId]: e.target.value,
-                                    }))
-                                  }
-                                  placeholder="سبب الفرق..."
-                                  className="w-full min-h-[38px] rounded-lg border border-zinc-200 px-2.5 text-xs disabled:bg-zinc-100"
-                                />
+                                {isDeptQtyReadOnly ? (
+                                  <span className="text-xs text-zinc-500">{item.note || '—'}</span>
+                                ) : (
+                                  <input
+                                    type="text"
+                                    disabled={
+                                      selectedTransfer.status !== 'pending_receipt' || isSessionClosed
+                                    }
+                                    value={itemNoteMap[item.productId] ?? ''}
+                                    onChange={(e) =>
+                                      setItemNoteMap((prev) => ({
+                                        ...prev,
+                                        [item.productId]: e.target.value,
+                                      }))
+                                    }
+                                    placeholder="سبب الفرق..."
+                                    className="w-full min-h-[38px] rounded-lg border border-zinc-200 px-2.5 text-xs disabled:bg-zinc-100"
+                                  />
+                                )}
                               </td>
                             </tr>
                           );
@@ -768,7 +789,7 @@ export const ProductionWorkspace: React.FC = () => {
                   </div>
                 )}
 
-                {selectedTransfer.status === 'pending_receipt' && !isSessionClosed && (
+                {!isDeptQtyReadOnly && selectedTransfer.status === 'pending_receipt' && !isSessionClosed && (
                   <div className="p-5 border-t border-zinc-100 bg-zinc-50/50 space-y-3">
                     <input
                       type="text"
@@ -797,75 +818,81 @@ export const ProductionWorkspace: React.FC = () => {
       {/* TAB 2: Independent Production */}
       {activeTab === 'independent' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          <form
-            onSubmit={handleAddIndependent}
-            className="lg:col-span-5 bg-white border border-zinc-200 rounded-2xl p-5 space-y-4"
-          >
-            <div className="flex items-center gap-2">
-              <Factory className="h-5 w-5 text-[#D91B23]" />
-              <h3 className="text-base font-bold text-zinc-900 font-display">
-                تسجيل إنتاج مستقل مباشر
-              </h3>
-            </div>
-            <p className="text-xs text-zinc-500">
-              يُستخدم للكميات التي أُنتجت مباشرة داخل قسم الإنتاج ولم ترد من المعمل.
-            </p>
-            <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1">الصنف</label>
-              <select
-                value={indProdId || approvedProducts[0]?.id || ''}
-                onChange={(e) => setIndProdId(e.target.value)}
-                disabled={isSessionClosed || isSubmitted}
-                className="w-full min-h-[44px] rounded-xl border border-zinc-200 px-3 text-sm disabled:bg-zinc-100"
-              >
-                {approvedProducts.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({categoryMap.get(p.categoryId) || ''} · {p.unit})
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1">الكمية المنتجة</label>
-              <input
-                type="number"
-                min="0.1"
-                step="any"
-                required
-                disabled={isSessionClosed || isSubmitted}
-                value={indQty}
-                onChange={(e) => setIndQty(e.target.value)}
-                placeholder="أدخل العدد"
-                className="w-full min-h-[44px] rounded-xl border border-zinc-200 px-3 text-sm tabular-nums disabled:bg-zinc-100"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1">ملاحظة</label>
-              <input
-                type="text"
-                disabled={isSessionClosed || isSubmitted}
-                value={indNote}
-                onChange={(e) => setIndNote(e.target.value)}
-                placeholder="تفاصيل الدفعة..."
-                className="w-full min-h-[44px] rounded-xl border border-zinc-200 px-3 text-sm disabled:bg-zinc-100"
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={busy || isSessionClosed || isSubmitted}
-              className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#D91B23] text-sm font-bold text-white hover:bg-[#B9141B] cursor-pointer disabled:opacity-50"
+          {!isDeptQtyReadOnly && (
+            <form
+              onSubmit={handleAddIndependent}
+              className="lg:col-span-5 bg-white border border-zinc-200 rounded-2xl p-5 space-y-4"
             >
-              <PlusCircle className="h-4 w-4" />
-              <span>{isSubmitted ? 'تم ترحيل التقرير' : 'تسجيل الإنتاج المستقل'}</span>
-            </button>
-          </form>
+              <div className="flex items-center gap-2">
+                <Factory className="h-5 w-5 text-[#D91B23]" />
+                <h3 className="text-base font-bold text-zinc-900 font-display">
+                  تسجيل إنتاج مستقل مباشر
+                </h3>
+              </div>
+              <p className="text-xs text-zinc-500">
+                يُستخدم للكميات التي أُنتجت مباشرة داخل قسم الإنتاج ولم ترد من المعمل.
+              </p>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 mb-1">الصنف</label>
+                <select
+                  value={indProdId || approvedProducts[0]?.id || ''}
+                  onChange={(e) => setIndProdId(e.target.value)}
+                  disabled={isSessionClosed || isSubmitted}
+                  className="w-full min-h-[44px] rounded-xl border border-zinc-200 px-3 text-sm disabled:bg-zinc-100"
+                >
+                  {approvedProducts.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({categoryMap.get(p.categoryId) || ''} · {p.unit})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 mb-1">الكمية المنتجة</label>
+                <input
+                  type="number"
+                  min="0.1"
+                  step="any"
+                  required
+                  disabled={isSessionClosed || isSubmitted}
+                  value={indQty}
+                  onChange={(e) => setIndQty(e.target.value)}
+                  placeholder="أدخل العدد"
+                  className="w-full min-h-[44px] rounded-xl border border-zinc-200 px-3 text-sm tabular-nums disabled:bg-zinc-100"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 mb-1">ملاحظة</label>
+                <input
+                  type="text"
+                  disabled={isSessionClosed || isSubmitted}
+                  value={indNote}
+                  onChange={(e) => setIndNote(e.target.value)}
+                  placeholder="تفاصيل الدفعة..."
+                  className="w-full min-h-[44px] rounded-xl border border-zinc-200 px-3 text-sm disabled:bg-zinc-100"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={busy || isSessionClosed || isSubmitted}
+                className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#D91B23] text-sm font-bold text-white hover:bg-[#B9141B] cursor-pointer disabled:opacity-50"
+              >
+                <PlusCircle className="h-4 w-4" />
+                <span>{isSubmitted ? 'تم ترحيل التقرير' : 'تسجيل الإنتاج المستقل'}</span>
+              </button>
+            </form>
+          )}
 
-          <div className="lg:col-span-7 bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+          <div
+            className={`${
+              isDeptQtyReadOnly ? 'lg:col-span-12' : 'lg:col-span-7'
+            } bg-white border border-zinc-200 rounded-2xl overflow-hidden`}
+          >
             <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between gap-2">
               <h3 className="text-base font-bold text-zinc-900 font-display">
                 سجل الإنتاج المستقل لليوم
               </h3>
-              {isSubmitted && !isSessionClosed && (
+              {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                 <button
                   type="button"
                   onClick={() => {
@@ -908,7 +935,7 @@ export const ProductionWorkspace: React.FC = () => {
                         <span className="text-base font-extrabold text-zinc-900 tabular-nums">
                           +{entry.qty} {p?.unit || ''}
                         </span>
-                        {isSubmitted && !isSessionClosed && p && (
+                        {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && p && (
                           <button
                             type="button"
                             onClick={() => {

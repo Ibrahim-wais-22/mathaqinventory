@@ -70,9 +70,24 @@ export const PERMISSION_LABELS: Record<PermissionKey, string> = {
   view_audit_logs: 'الاطلاع على سجل العمليات والتدقيق',
 };
 
+export const DEPARTMENT_OPERATION_PERMISSIONS: PermissionKey[] = [
+  'factory_operations',
+  'production_operations',
+  'sales_operations',
+  'waste_operations',
+];
+
+export const ALL_PERMISSIONS: PermissionKey[] = Object.keys(
+  PERMISSION_LABELS
+) as PermissionKey[];
+
+export const MANAGER_DEFAULT_PERMISSIONS: PermissionKey[] = ALL_PERMISSIONS.filter(
+  (p) => !DEPARTMENT_OPERATION_PERMISSIONS.includes(p)
+);
+
 export const DEFAULT_ROLE_PERMISSIONS: Record<Exclude<UserRole, 'pending'>, PermissionKey[]> = {
-  ceo: Object.keys(PERMISSION_LABELS) as PermissionKey[],
-  branch_manager: Object.keys(PERMISSION_LABELS) as PermissionKey[],
+  ceo: MANAGER_DEFAULT_PERMISSIONS,
+  branch_manager: MANAGER_DEFAULT_PERMISSIONS,
   factory_staff: ['factory_operations', 'backdate_entries'],
   production_operations: undefined as never,
   production_staff: [
@@ -90,7 +105,7 @@ export function getDefaultPermissionsForRole(role: Exclude<UserRole, 'pending'>)
   switch (role) {
     case 'ceo':
     case 'branch_manager':
-      return Object.keys(PERMISSION_LABELS) as PermissionKey[];
+      return [...MANAGER_DEFAULT_PERMISSIONS];
     case 'factory_staff':
       return ['factory_operations', 'backdate_entries'];
     case 'production_staff':

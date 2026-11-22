@@ -66,6 +66,10 @@ export interface UserAccount {
   employeeNumber: string;
   username: string;
   fullName: string;
+  phoneNumber?: string;
+  passwordSalt?: string;
+  passwordHash?: string;
+  passwordUpdatedAt?: Timestamp;
   email: string;
   department: DepartmentId;
   role: UserRole;
@@ -83,6 +87,9 @@ export interface UserInvite {
   employeeNumber: string;
   username: string;
   fullName: string;
+  phoneNumber?: string;
+  passwordSalt?: string;
+  passwordHash?: string;
   department: DepartmentId;
   role: Exclude<UserRole, 'pending'>;
   branchId: string;

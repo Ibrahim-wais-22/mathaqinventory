@@ -40,6 +40,7 @@ export const WasteWorkspace: React.FC = () => {
     refreshSession,
     categories,
     products,
+    isDeptQtyReadOnly,
   } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
@@ -76,15 +77,17 @@ export const WasteWorkspace: React.FC = () => {
     setWasteMap({});
     if (!account || !currentSession) return;
     let active = true;
-    ensureDepartmentReport(account, currentSession, 'waste')
-      .then((rep) => {
-        if (active) setReport(rep);
-      })
-      .catch((err) => {
-        if (active) {
-          setFeedback({ type: 'error', text: formatActionError(err, 'تعذر تحميل تقرير الهدر.') });
-        }
-      });
+    if (!isDeptQtyReadOnly) {
+      ensureDepartmentReport(account, currentSession, 'waste')
+        .then((rep) => {
+          if (active) setReport(rep);
+        })
+        .catch((err) => {
+          if (active) {
+            setFeedback({ type: 'error', text: formatActionError(err, 'تعذر تحميل تقرير الهدر.') });
+          }
+        });
+    }
 
     const reportId = `${currentSession.id}_waste`;
     const unsubRep = onSnapshot(
@@ -281,6 +284,12 @@ export const WasteWorkspace: React.FC = () => {
         )}
       </div>
 
+      {isDeptQtyReadOnly && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-900">
+          وضع الاطلاع فقط — صلاحيات إدخال أو تعديل كميات الهدر والمتبقي مقتصرة على موظفي الهدر ومخفية عن المدير التنفيذي ومدير الفرع.
+        </div>
+      )}
+
       {/* Clear distinction notice per PRD Section 7 */}
       <div className="rounded-2xl border border-zinc-200 bg-white p-4 flex items-start gap-3 text-xs text-zinc-600">
         <Info className="h-4 w-4 text-[#F39200] shrink-0 mt-0.5" />
@@ -359,7 +368,7 @@ export const WasteWorkspace: React.FC = () => {
           <span className="text-xs text-zinc-500">
             عدد الأصناف المدخلة: <strong className="tabular-nums">{enteredCount}</strong>
           </span>
-          {!isSubmitted && !isSessionClosed && (
+          {!isDeptQtyReadOnly && !isSubmitted && !isSessionClosed && (
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -392,7 +401,7 @@ export const WasteWorkspace: React.FC = () => {
                 <th className="px-3 py-3 font-semibold">التالف</th>
                 <th className="px-3 py-3 font-semibold">المتبقي الصالح</th>
                 <th className="px-3 py-3 font-semibold">المتبقي غير الصالح</th>
-                {isSubmitted && !isSessionClosed && (
+                {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                   <th className="px-4 py-3 font-semibold">تصحيح</th>
                 )}
               </tr>
@@ -414,42 +423,60 @@ export const WasteWorkspace: React.FC = () => {
                       {categoryMap.get(prod.categoryId) || '—'}
                     </td>
                     <td className="px-3 py-3">
-                      <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        disabled={isSubmitted || isSessionClosed}
-                        value={row.damagedQty}
-                        onChange={(e) => setField(prod.id, 'damagedQty', e.target.value)}
-                        placeholder="0"
-                        className="w-24 min-h-[40px] rounded-xl border border-zinc-200 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
-                      />
+                      {isDeptQtyReadOnly ? (
+                        <span className="inline-block min-w-[48px] text-center font-semibold tabular-nums text-zinc-800">
+                          {row.damagedQty !== '' ? row.damagedQty : '—'}
+                        </span>
+                      ) : (
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          disabled={isSubmitted || isSessionClosed}
+                          value={row.damagedQty}
+                          onChange={(e) => setField(prod.id, 'damagedQty', e.target.value)}
+                          placeholder="0"
+                          className="w-24 min-h-[40px] rounded-xl border border-zinc-200 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
+                        />
+                      )}
                     </td>
                     <td className="px-3 py-3">
-                      <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        disabled={isSubmitted || isSessionClosed}
-                        value={row.validRemainingQty}
-                        onChange={(e) => setField(prod.id, 'validRemainingQty', e.target.value)}
-                        placeholder="0"
-                        className="w-24 min-h-[40px] rounded-xl border border-emerald-200 bg-emerald-50/30 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
-                      />
+                      {isDeptQtyReadOnly ? (
+                        <span className="inline-block min-w-[48px] text-center font-semibold tabular-nums text-emerald-700">
+                          {row.validRemainingQty !== '' ? row.validRemainingQty : '—'}
+                        </span>
+                      ) : (
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          disabled={isSubmitted || isSessionClosed}
+                          value={row.validRemainingQty}
+                          onChange={(e) => setField(prod.id, 'validRemainingQty', e.target.value)}
+                          placeholder="0"
+                          className="w-24 min-h-[40px] rounded-xl border border-emerald-200 bg-emerald-50/30 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
+                        />
+                      )}
                     </td>
                     <td className="px-3 py-3">
-                      <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        disabled={isSubmitted || isSessionClosed}
-                        value={row.invalidRemainingQty}
-                        onChange={(e) => setField(prod.id, 'invalidRemainingQty', e.target.value)}
-                        placeholder="0"
-                        className="w-24 min-h-[40px] rounded-xl border border-zinc-200 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
-                      />
+                      {isDeptQtyReadOnly ? (
+                        <span className="inline-block min-w-[48px] text-center font-semibold tabular-nums text-zinc-800">
+                          {row.invalidRemainingQty !== '' ? row.invalidRemainingQty : '—'}
+                        </span>
+                      ) : (
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          disabled={isSubmitted || isSessionClosed}
+                          value={row.invalidRemainingQty}
+                          onChange={(e) => setField(prod.id, 'invalidRemainingQty', e.target.value)}
+                          placeholder="0"
+                          className="w-24 min-h-[40px] rounded-xl border border-zinc-200 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
+                        />
+                      )}
                     </td>
-                    {isSubmitted && !isSessionClosed && (
+                    {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                       <td className="px-4 py-3">
                         <button
                           type="button"

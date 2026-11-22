@@ -15,12 +15,15 @@ import { UsersManagement } from './modules/users/UsersManagement';
 import { WasteWorkspace } from './modules/waste/WasteWorkspace';
 
 const AuthenticatedApp: React.FC = () => {
-  const { firebaseUser, account, authLoading, isAdmin, hasPermission } = useFirebase();
+  const { firebaseUser, account, authLoading, isCredentialUnlocked, isAdmin, hasPermission } =
+    useFirebase();
   const [activeTab, setActiveTab] = useState<NavTabId>('dashboard');
   const [reportFilter, setReportFilter] = useState<string | undefined>(undefined);
 
+ 
   useEffect(() => {
-    if (!account || account.status !== 'active') return;
+    
+    if (!account || account.status !== 'active' || !isCredentialUnlocked) return;
     if (isAdmin) {
       setActiveTab('dashboard');
     } else if (account.department === 'factory') {
@@ -32,24 +35,27 @@ const AuthenticatedApp: React.FC = () => {
     } else if (account.department === 'waste') {
       setActiveTab('waste');
     }
-  }, [account?.uid, account?.status, account?.department, isAdmin]);
-
+  }, [account?.uid, account?.status, account?.department, isAdmin, isCredentialUnlocked]);
+  
   if (authLoading) {
-    return (
+    return ( 
+      
       <div className="min-h-screen bg-[#FAFAFA] flex items-center justify-center p-6" dir="rtl">
         <div className="text-center space-y-3">
           <div className="h-10 w-10 mx-auto rounded-full border-4 border-zinc-200 border-t-[#D91B23] animate-spin" />
           <p className="text-sm font-semibold text-zinc-600">
-            جاري تحميل بيانات نظام المذاق اليمني...
+           جاري تحميل بيانات نظام المذاق اليمني...
           </p>
         </div>
       </div>
+      
     );
+    
   }
 
-  if (!firebaseUser || !account) {
+  if (!firebaseUser || !account || !isCredentialUnlocked) {
     return <LoginScreen />;
-  }
+ }
 
   if (account.status !== 'active') {
     return <PendingActivationScreen />;

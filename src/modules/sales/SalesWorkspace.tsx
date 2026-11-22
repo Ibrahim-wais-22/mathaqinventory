@@ -36,6 +36,7 @@ export const SalesWorkspace: React.FC = () => {
     categories,
     products,
     hasPermission,
+    isDeptQtyReadOnly,
   } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
@@ -72,15 +73,17 @@ export const SalesWorkspace: React.FC = () => {
     setSalesMap({});
     if (!account || !currentSession) return;
     let active = true;
-    ensureDepartmentReport(account, currentSession, 'sales')
-      .then((rep) => {
-        if (active) setReport(rep);
-      })
-      .catch((err) => {
-        if (active) {
-          setFeedback({ type: 'error', text: formatActionError(err, 'تعذر تحميل تقرير المبيعات.') });
-        }
-      });
+    if (!isDeptQtyReadOnly) {
+      ensureDepartmentReport(account, currentSession, 'sales')
+        .then((rep) => {
+          if (active) setReport(rep);
+        })
+        .catch((err) => {
+          if (active) {
+            setFeedback({ type: 'error', text: formatActionError(err, 'تعذر تحميل تقرير المبيعات.') });
+          }
+        });
+    }
 
     const reportId = `${currentSession.id}_sales`;
     const unsubRep = onSnapshot(
@@ -275,6 +278,12 @@ export const SalesWorkspace: React.FC = () => {
         </div>
       </div>
 
+      {isDeptQtyReadOnly && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-900">
+          وضع الاطلاع فقط — صلاحيات إدخال أو تعديل كميات المبيعات مقتصرة على موظفي المبيعات ومخفية عن المدير التنفيذي ومدير الفرع.
+        </div>
+      )}
+
       {sessionError && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 flex flex-wrap items-center justify-between gap-2">
           <span>{sessionError}</span>
@@ -359,7 +368,7 @@ export const SalesWorkspace: React.FC = () => {
               <span className="text-xs text-zinc-500">
                 أدخل 0 للأصناف التي لم يُبع منها شيء، واترك غير المدخل فارغاً حتى يكتمل الجرد.
               </span>
-              {!isSubmitted && !isSessionClosed && (
+              {!isDeptQtyReadOnly && !isSubmitted && !isSessionClosed && (
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -391,7 +400,7 @@ export const SalesWorkspace: React.FC = () => {
                     <th className="px-4 py-3 font-semibold">المجموعة</th>
                     <th className="px-4 py-3 font-semibold">الوحدة</th>
                     <th className="px-4 py-3 font-semibold">عدد الوحدات المباعة</th>
-                    {isSubmitted && !isSessionClosed && (
+                    {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                       <th className="px-4 py-3 font-semibold">تصحيح</th>
                     )}
                   </tr>
@@ -405,20 +414,28 @@ export const SalesWorkspace: React.FC = () => {
                       </td>
                       <td className="px-4 py-3 text-zinc-600">{prod.unit}</td>
                       <td className="px-4 py-3">
-                        <input
-                          type="number"
-                          min="0"
-                          step="any"
-                          disabled={isSubmitted || isSessionClosed}
-                          value={salesMap[prod.id] ?? ''}
-                          onChange={(e) =>
-                            setSalesMap((prev) => ({ ...prev, [prod.id]: e.target.value }))
-                          }
-                          placeholder="لم يُدخل"
-                          className="w-32 min-h-[40px] rounded-xl border border-zinc-200 px-3 text-center font-semibold tabular-nums focus:outline-none focus:border-[#D91B23] disabled:bg-zinc-100"
-                        />
+                        {isDeptQtyReadOnly ? (
+                          <span className="inline-block min-w-[64px] text-center font-semibold tabular-nums text-zinc-800">
+                            {salesMap[prod.id] !== undefined && salesMap[prod.id] !== ''
+                              ? salesMap[prod.id]
+                              : '—'}
+                          </span>
+                        ) : (
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            disabled={isSubmitted || isSessionClosed}
+                            value={salesMap[prod.id] ?? ''}
+                            onChange={(e) =>
+                              setSalesMap((prev) => ({ ...prev, [prod.id]: e.target.value }))
+                            }
+                            placeholder="لم يُدخل"
+                            className="w-32 min-h-[40px] rounded-xl border border-zinc-200 px-3 text-center font-semibold tabular-nums focus:outline-none focus:border-[#D91B23] disabled:bg-zinc-100"
+                          />
+                        )}
                       </td>
-                      {isSubmitted && !isSessionClosed && (
+                      {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                         <td className="px-4 py-3">
                           <button
                             type="button"

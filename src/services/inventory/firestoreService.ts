@@ -34,6 +34,11 @@ import type {
   UserRole,
 } from '../../types/inventory';
 import { getPreviousAdenDate, makeSessionId } from '../../utils/dateAden';
+import {
+  hashPassword,
+  normalizePhoneForPassword,
+  verifyPassword,
+} from '../../utils/passwordCrypto';
 import { OperationType, db, handleFirestoreError } from '../firebase/config';
 import { calculateProductInventory, roundQty, safeNum, sanitizeId } from './calculator';
 
@@ -120,24 +125,43 @@ export async function createUserInvite(
     employeeNumber: string;
     username: string;
     fullName: string;
+    phoneNumber: string;
     role: Exclude<UserRole, 'pending'>;
     status: 'active' | 'suspended';
     permissions?: PermissionKey[];
   }
 ): Promise<void> {
   const normalizedEmail = input.email.trim().toLowerCase();
+  const cleanEmployeeNumber = input.employeeNumber.trim().slice(0, 40);
+  const cleanUsername = input.username.trim().slice(0, 80);
+  const cleanFullName = input.fullName.trim().slice(0, 120);
+  const cleanPhone = input.phoneNumber.trim().slice(0, 40);
+  const cleanPhonePass = normalizePhoneForPassword(cleanPhone);
+
+  if (!normalizedEmail || !cleanEmployeeNumber || !cleanUsername || !cleanFullName || !cleanPhone) {
+    throw new Error('يرجى إدخال جميع البيانات الأساسية للموظف بما فيها رقم الهاتف.');
+  }
+  if (cleanPhonePass.length < 4) {
+    throw new Error('رقم الهاتف يجب أن لا يقل عن 4 أرقام لأنه يُستخدم ككلمة مرور مبدئية.');
+  }
+
   const inviteId = makeUniqueId('inv');
   const department = getDepartmentForRole(input.role);
   const permissions = input.permissions?.length
     ? input.permissions
     : getDefaultPermissionsForRole(input.role);
 
+  const { salt, hash } = await hashPassword(cleanPhonePass);
+
   try {
     await setDoc(doc(db, 'userInvites', inviteId), {
       email: normalizedEmail,
-      employeeNumber: input.employeeNumber.trim().slice(0, 40),
-      username: input.username.trim().slice(0, 80),
-      fullName: input.fullName.trim().slice(0, 120),
+      employeeNumber: cleanEmployeeNumber,
+      username: cleanUsername,
+      fullName: cleanFullName,
+      phoneNumber: cleanPhone,
+      passwordSalt: salt,
+      passwordHash: hash,
       department,
       role: input.role,
       branchId: DEFAULT_BRANCH_ID,
@@ -155,7 +179,7 @@ export async function createUserInvite(
       targetCollection: 'userInvites',
       targetId: inviteId,
       department: 'management',
-      newValueSummary: `${input.fullName} (${normalizedEmail}) - ${input.role}`,
+      newValueSummary: `${cleanFullName} (${normalizedEmail}) - ${input.role}`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `userInvites/${inviteId}`);
@@ -169,6 +193,8 @@ export async function updateUserAccountByAdmin(
     employeeNumber: string;
     username: string;
     fullName: string;
+    phoneNumber?: string;
+    resetPasswordToPhone?: boolean;
     role: UserRole;
     status: 'active' | 'suspended';
     permissions: PermissionKey[];
@@ -176,30 +202,61 @@ export async function updateUserAccountByAdmin(
 ): Promise<void> {
   const department =
     updates.role === 'pending' ? targetUser.department : getDepartmentForRole(updates.role);
-  const cleanEmailFallback = (targetUser.email || 'user').split('@')[0] || 'user';
-  const cleanEmployeeNumber = (updates.employeeNumber || targetUser.employeeNumber || 'EMP-100')
-    .trim()
-    .slice(0, 40);
-  const cleanUsername = (updates.username || targetUser.username || cleanEmailFallback)
-    .trim()
-    .slice(0, 80);
-  const cleanFullName = (updates.fullName || targetUser.fullName || cleanEmailFallback)
-    .trim()
-    .slice(0, 120);
+  const cleanEmployeeNumber = (updates.employeeNumber || '').trim().slice(0, 40);
+  const cleanUsername = (updates.username || '').trim().slice(0, 80);
+  const cleanFullName = (updates.fullName || '').trim().slice(0, 120);
+  const cleanPhone = (updates.phoneNumber ?? targetUser.phoneNumber ?? '').trim().slice(0, 40);
+  const cleanPhonePass = normalizePhoneForPassword(cleanPhone);
+
+  if (updates.status === 'active') {
+    if (!cleanEmployeeNumber || !cleanUsername || !cleanFullName || !cleanPhone) {
+      throw new Error(
+        'يجب إدخال جميع البيانات الأساسية للموظف (الرقم الوظيفي، الاسم الكامل، اسم المستخدم، ورقم الهاتف) قبل التفعيل.'
+      );
+    }
+    if (cleanPhonePass.length < 4) {
+      throw new Error('رقم الهاتف يجب أن لا يقل عن 4 أرقام لأنه يُستخدم ككلمة مرور مبدئية.');
+    }
+  }
+
+  const finalEmpNo =
+    cleanEmployeeNumber || (targetUser.employeeNumber || 'EMP-100').trim().slice(0, 40);
+  const finalUsername =
+    cleanUsername || (targetUser.username || targetUser.email.split('@')[0] || 'user').trim().slice(0, 80);
+  const finalFullName =
+    finalUsername && !cleanFullName
+      ? (targetUser.fullName || finalUsername).trim().slice(0, 120)
+      : cleanFullName || (targetUser.fullName || 'موظف').trim().slice(0, 120);
 
   const batch = writeBatch(db);
   const userRef = doc(db, 'users', targetUser.uid);
 
-  batch.update(userRef, {
-    employeeNumber: cleanEmployeeNumber,
-    username: cleanUsername,
-    fullName: cleanFullName,
+  const userPayload: Record<string, unknown> = {
+    employeeNumber: finalEmpNo,
+    username: finalUsername,
+    fullName: finalFullName,
     department,
     role: updates.role,
     status: updates.status,
     permissions: updates.permissions,
     updatedAt: serverTimestamp(),
-  });
+  };
+
+  if (cleanPhone) {
+    userPayload.phoneNumber = cleanPhone;
+  }
+
+  const shouldSetInitialPassword =
+    cleanPhonePass.length >= 4 &&
+    (updates.resetPasswordToPhone || !targetUser.passwordHash || !targetUser.passwordSalt);
+
+  if (shouldSetInitialPassword) {
+    const { salt, hash } = await hashPassword(cleanPhonePass);
+    userPayload.passwordSalt = salt;
+    userPayload.passwordHash = hash;
+  }
+
+  batch.update(userRef, userPayload);
 
   const adminRef = doc(db, 'admins', targetUser.uid);
   const isManagerRole = updates.role === 'ceo' || updates.role === 'branch_manager';
@@ -237,10 +294,64 @@ export async function updateUserAccountByAdmin(
       targetId: targetUser.uid,
       department: 'management',
       oldValueSummary: `${targetUser.role} (${targetUser.status})`,
-      newValueSummary: `${cleanFullName} - ${updates.role} (${updates.status})`,
+      newValueSummary: `${finalFullName} (${finalEmpNo}) - ${updates.role} (${updates.status})`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `users/${targetUser.uid}`);
+  }
+}
+
+export async function changeOwnPassword(
+  actor: UserAccount,
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  const trimmedNew = newPassword.trim();
+  const trimmedCurrent = currentPassword.trim();
+
+  if (trimmedNew.length < 4 || trimmedNew.length > 64) {
+    throw new Error('يجب أن تتكون كلمة المرور الجديدة من 4 إلى 64 خانة.');
+  }
+
+  if (actor.passwordHash && actor.passwordSalt) {
+    let valid = await verifyPassword(trimmedCurrent, actor.passwordSalt, actor.passwordHash);
+    if (!valid) {
+      const normalizedCurrent = normalizePhoneForPassword(currentPassword);
+      if (normalizedCurrent && normalizedCurrent !== trimmedCurrent) {
+        valid = await verifyPassword(normalizedCurrent, actor.passwordSalt, actor.passwordHash);
+      }
+    }
+    if (!valid) {
+      throw new Error('كلمة المرور الحالية غير صحيحة.');
+    }
+  } else if (actor.phoneNumber) {
+    const expectedPhone = normalizePhoneForPassword(actor.phoneNumber);
+    const entered = normalizePhoneForPassword(currentPassword);
+    if (entered !== expectedPhone) {
+      throw new Error('كلمة المرور الحالية غير صحيحة.');
+    }
+  }
+
+  const { salt, hash } = await hashPassword(trimmedNew);
+
+  try {
+    await updateDoc(doc(db, 'users', actor.uid), {
+      passwordSalt: salt,
+      passwordHash: hash,
+      passwordUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    await appendAuditLog({
+      actor,
+      action: 'تغيير_كلمة_المرور',
+      targetCollection: 'users',
+      targetId: actor.uid,
+      department: actor.department,
+      newValueSummary: 'تم تحديث كلمة المرور بنجاح من قبل صاحب الحساب',
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `users/${actor.uid}`);
   }
 }
 

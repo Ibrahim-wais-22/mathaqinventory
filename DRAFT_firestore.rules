@@ -140,11 +140,15 @@ service cloud.firestore {
     // Users (PII strictly isolated to owner or Admin)
     function isValidUserAccount(data) {
       return data.keys().hasAll(['uid', 'employeeNumber', 'username', 'fullName', 'email', 'department', 'role', 'branchId', 'status', 'permissions', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'employeeNumber', 'username', 'fullName', 'email', 'department', 'role', 'branchId', 'status', 'permissions', 'inviteId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'employeeNumber', 'username', 'fullName', 'phoneNumber', 'passwordSalt', 'passwordHash', 'passwordUpdatedAt', 'email', 'department', 'role', 'branchId', 'status', 'permissions', 'inviteId', 'createdAt', 'updatedAt']) &&
         isValidId(data.uid) &&
         isNonEmptyString(data.employeeNumber, 40) &&
         isNonEmptyString(data.username, 80) &&
         isNonEmptyString(data.fullName, 120) &&
+        (!('phoneNumber' in data) || isValidString(data.phoneNumber, 40)) &&
+        (!('passwordSalt' in data) || isValidString(data.passwordSalt, 128)) &&
+        (!('passwordHash' in data) || isValidString(data.passwordHash, 128)) &&
+        (!('passwordUpdatedAt' in data) || data.passwordUpdatedAt is timestamp) &&
         isNonEmptyString(data.email, 200) &&
         data.department in ['management', 'factory', 'production', 'sales', 'waste'] &&
         data.role in ['ceo', 'branch_manager', 'factory_staff', 'production_staff', 'sales_staff', 'waste_staff', 'pending'] &&
@@ -166,7 +170,13 @@ service cloud.firestore {
         data.department == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.department &&
         data.status == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.status &&
         data.permissions == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.permissions &&
-        data.branchId == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.branchId;
+        data.branchId == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.branchId &&
+        (!('phoneNumber' in get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data) ||
+          data.phoneNumber == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.phoneNumber) &&
+        (!('passwordSalt' in get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data) ||
+          data.passwordSalt == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.passwordSalt) &&
+        (!('passwordHash' in get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data) ||
+          data.passwordHash == get(/databases/$(database)/documents/userInvites/$(data.inviteId)).data.passwordHash);
     }
     match /users/{uid} {
       allow get: if (isOwner(uid) || isAdmin()) && isValidId(uid);
@@ -197,7 +207,12 @@ service cloud.firestore {
           isAdmin() ||
           (
             isOwner(uid) &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'passwordSalt', 'passwordHash', 'passwordUpdatedAt', 'updatedAt']) &&
+            (!('passwordUpdatedAt' in incoming().diff(existing()).affectedKeys()) || incoming().passwordUpdatedAt == request.time) &&
+            (!('passwordHash' in incoming().diff(existing()).affectedKeys()) || (
+              isNonEmptyString(incoming().passwordHash, 128) &&
+              isNonEmptyString(incoming().passwordSalt, 128)
+            ))
           )
         );
     }
@@ -205,11 +220,14 @@ service cloud.firestore {
     // User Invites (Pre-assigned roles by Admin)
     function isValidUserInvite(data) {
       return data.keys().hasAll(['email', 'employeeNumber', 'username', 'fullName', 'department', 'role', 'branchId', 'status', 'permissions', 'claimed', 'createdBy', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['email', 'employeeNumber', 'username', 'fullName', 'department', 'role', 'branchId', 'status', 'permissions', 'claimed', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['email', 'employeeNumber', 'username', 'fullName', 'phoneNumber', 'passwordSalt', 'passwordHash', 'department', 'role', 'branchId', 'status', 'permissions', 'claimed', 'createdBy', 'createdAt', 'updatedAt']) &&
         isNonEmptyString(data.email, 200) &&
         isNonEmptyString(data.employeeNumber, 40) &&
         isNonEmptyString(data.username, 80) &&
         isNonEmptyString(data.fullName, 120) &&
+        (!('phoneNumber' in data) || isValidString(data.phoneNumber, 40)) &&
+        (!('passwordSalt' in data) || isValidString(data.passwordSalt, 128)) &&
+        (!('passwordHash' in data) || isValidString(data.passwordHash, 128)) &&
         data.department in ['management', 'factory', 'production', 'sales', 'waste'] &&
         data.role in ['ceo', 'branch_manager', 'factory_staff', 'production_staff', 'sales_staff', 'waste_staff'] &&
         isValidId(data.branchId) &&
@@ -408,7 +426,8 @@ service cloud.firestore {
         sessionIsOpen(incoming().sessionId) &&
         incoming().createdBy == request.auth.uid &&
         incoming().createdAt == request.time && incoming().updatedAt == request.time &&
-        (isAdmin() || (userDepartment() == incoming().department && incoming().status == 'draft'));
+        (userDepartment() == incoming().department || isBootstrapAdmin()) &&
+        incoming().status == 'draft';
       allow update: if isActiveUser() && isValidId(reportId) && isValidDepartmentReport(incoming()) &&
         incoming().sessionId == existing().sessionId &&
         incoming().branchId == existing().branchId &&
@@ -418,10 +437,13 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         (
-          isAdmin() ||
+          (
+            isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'approvedBy', 'approvedByName', 'lastCorrectionReason', 'updatedAt'])
+          ) ||
           (
             sessionIsOpen(existing().sessionId) &&
-            userDepartment() == existing().department &&
+            (userDepartment() == existing().department || isBootstrapAdmin()) &&
             existing().status == 'draft' &&
             incoming().status in ['draft', 'submitted'] &&
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'itemCount', 'submittedBy', 'submittedByName', 'updatedAt'])
@@ -444,10 +466,13 @@ service cloud.firestore {
           incoming().createdAt == request.time && incoming().updatedAt == request.time &&
           exists(/databases/$(database)/documents/departmentReports/$(reportId)) &&
           (
-            isAdmin() ||
+            (
+              isAdmin() &&
+              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status != 'draft'
+            ) ||
             (
               sessionIsOpen(incoming().sessionId) &&
-              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() &&
+              (get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() || isBootstrapAdmin()) &&
               get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'draft'
             )
           );
@@ -460,10 +485,13 @@ service cloud.firestore {
           incoming().updatedBy == request.auth.uid &&
           incoming().updatedAt == request.time &&
           (
-            isAdmin() ||
+            (
+              isAdmin() &&
+              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status != 'draft'
+            ) ||
             (
               sessionIsOpen(existing().sessionId) &&
-              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() &&
+              (get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() || isBootstrapAdmin()) &&
               get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'draft'
             )
           );
@@ -515,24 +543,19 @@ service cloud.firestore {
         incoming().createdBy == request.auth.uid &&
         incoming().status == 'pending_receipt' &&
         incoming().createdAt == request.time && incoming().updatedAt == request.time &&
-        (isAdmin() || isDept('factory'));
+        (isDept('factory') || isBootstrapAdmin());
       allow update: if isActiveUser() && isValidId(transferId) && isValidFactoryTransfer(incoming()) &&
         incoming().sessionId == existing().sessionId &&
         incoming().createdBy == existing().createdBy &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         sessionIsOpen(existing().sessionId) &&
-        (
-          isAdmin() ||
-          (
-            isDept('production') &&
-            existing().status == 'pending_receipt' &&
-            incoming().status in ['received', 'discrepancy_logged'] &&
-            incoming().totalSentQty == existing().totalSentQty &&
-            incoming().receivedBy == request.auth.uid &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'totalReceivedQty', 'totalVarianceQty', 'productionNote', 'receivedBy', 'receivedByName', 'updatedAt'])
-          )
-        );
+        (isDept('production') || isBootstrapAdmin()) &&
+        existing().status == 'pending_receipt' &&
+        incoming().status in ['received', 'discrepancy_logged'] &&
+        incoming().totalSentQty == existing().totalSentQty &&
+        incoming().receivedBy == request.auth.uid &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'totalReceivedQty', 'totalVarianceQty', 'productionNote', 'receivedBy', 'receivedByName', 'updatedAt']);
 
       match /items/{productId} {
         allow get: if isActiveUser() && isValidId(transferId) && isValidId(productId) && (isAdmin() || isDept('factory') || isDept('production'));
@@ -543,7 +566,7 @@ service cloud.firestore {
           incoming().createdAt == request.time && incoming().updatedAt == request.time &&
           existsAfter(/databases/$(database)/documents/factoryTransfers/$(transferId)) &&
           sessionIsOpen(incoming().sessionId) &&
-          (isAdmin() || isDept('factory'));
+          (isDept('factory') || isBootstrapAdmin());
         allow update: if isActiveUser() && isValidId(transferId) && isValidId(productId) && isValidFactoryTransferItem(incoming()) &&
           incoming().transferId == existing().transferId &&
           incoming().sessionId == existing().sessionId &&
@@ -552,14 +575,9 @@ service cloud.firestore {
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
           sessionIsOpen(existing().sessionId) &&
-          (
-            isAdmin() ||
-            (
-              isDept('production') &&
-              get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status == 'pending_receipt' &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['receivedQty', 'varianceQty', 'note', 'updatedAt'])
-            )
-          );
+          (isDept('production') || isBootstrapAdmin()) &&
+          get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status == 'pending_receipt' &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['receivedQty', 'varianceQty', 'note', 'updatedAt']);
       }
     }
 
@@ -586,11 +604,7 @@ service cloud.firestore {
         sessionIsOpen(incoming().sessionId) &&
         incoming().createdBy == request.auth.uid &&
         incoming().createdAt == request.time && incoming().updatedAt == request.time &&
-        (isAdmin() || isDept('production'));
-      allow update: if isAdmin() && isValidId(entryId) && isValidProductionEntry(incoming()) &&
-        incoming().createdBy == existing().createdBy &&
-        incoming().createdAt == existing().createdAt &&
-        incoming().updatedAt == request.time;
+        (isDept('production') || isBootstrapAdmin());
     }
 
     // Centralized Computed Product Results

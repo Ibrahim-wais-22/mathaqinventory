@@ -1,15 +1,99 @@
-import React from 'react';
-import { LogIn, ShieldCheck } from 'lucide-react';
+import React, { useState } from 'react';
+import {
+  Eye,
+  EyeOff,
+  KeyRound,
+  Link2,
+  LogIn,
+  Mail,
+  ShieldCheck,
+  Unlink,
+  UserPlus,
+} from 'lucide-react';
 import { BRAND_ENGLISH, BRAND_NAME } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { BrandLogo } from '../../components/common/BrandLogo';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
 
+type LoginTab = 'credentials' | 'first_time';
+
 export const LoginScreen: React.FC = () => {
-  const { signInWithGoogle, authError, authLoading } = useFirebase();
+  const {
+    signInWithGoogle,
+    signInWithCredentials,
+    unlinkGoogleAccount,
+    linkedEmail,
+    authError,
+    clearAuthError,
+    authLoading,
+  } = useFirebase();
+
+  const [tab, setTab] = useState<LoginTab>('credentials');
+  const [employeeNumber, setEmployeeNumber] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [emailLinkConsent, setEmailLinkConsent] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const activeError = localError || authError;
+
+  const handleSwitchTab = (next: LoginTab) => {
+    setTab(next);
+    setLocalError(null);
+    clearAuthError();
+  };
+
+  const handleCredentialSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLocalError(null);
+    clearAuthError();
+
+    if (!employeeNumber.trim() || !password.trim()) {
+      setLocalError('يرجى إدخال الرقم الوظيفي وكلمة المرور.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await signInWithCredentials(employeeNumber, password);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleFirstTimeGoogleLink = async () => {
+    setLocalError(null);
+    clearAuthError();
+
+    if (!emailLinkConsent) {
+      setLocalError('يرجى الموافقة أولاً على ربط بريدك الإلكتروني بالتطبيق للمتابعة.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await signInWithGoogle();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleUnlink = async () => {
+    setLocalError(null);
+    clearAuthError();
+    setSubmitting(true);
+    try {
+      await unlinkGoogleAccount();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const isBusy = authLoading || submitting;
 
   return (
-    <div className="min-h-screen bg-[#FAFAFA] flex flex-col justify-between p-6" dir="rtl">
+    <div className="min-h-screen bg-[#FAFAFA] flex flex-col justify-between p-4 sm:p-6" dir="rtl">
       <div className="flex items-center justify-between max-w-5xl w-full mx-auto">
         <div className="flex items-center gap-3">
           <BrandLogo size="sm" />
@@ -18,11 +102,11 @@ export const LoginScreen: React.FC = () => {
         <PWAInstallButton />
       </div>
 
-      <main className="flex-1 flex items-center justify-center py-10">
-        <div className="w-full max-w-md bg-white border border-zinc-200 rounded-2xl p-8">
+      <main className="flex-1 flex items-center justify-center py-8">
+        <div className="w-full max-w-md bg-white border border-zinc-200 rounded-2xl p-6 sm:p-8 shadow-xs">
           <div className="flex flex-col items-center text-center">
             <BrandLogo size="lg" />
-            <h1 className="mt-5 text-2xl font-extrabold text-zinc-900 font-display text-balance">
+            <h1 className="mt-4 text-2xl font-extrabold text-zinc-900 font-display text-balance">
               نظام متابعة الجرد اليومي
             </h1>
             <p className="mt-1 text-sm text-zinc-500">
@@ -30,32 +114,173 @@ export const LoginScreen: React.FC = () => {
             </p>
           </div>
 
-          <div className="mt-8 border-t border-zinc-100 pt-6">
-            <p className="text-sm text-zinc-600 leading-relaxed text-center">
-              سجّل الدخول بحسابك الوظيفي المعتمد عبر Google للوصول إلى مساحة عمل إدارتك ومتابعة
-              عمليات الجرد اليومية.
-            </p>
-
-            {authError && (
-              <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-700">
-                {authError}
-              </div>
-            )}
-
+          {/* Mode Tabs */}
+          <div className="mt-6 grid grid-cols-2 gap-1.5 rounded-xl bg-zinc-100 p-1">
             <button
               type="button"
-              onClick={() => void signInWithGoogle()}
-              disabled={authLoading}
-              className="mt-6 w-full min-h-[48px] flex items-center justify-center gap-3 rounded-xl bg-[#D91B23] px-5 py-3 text-sm font-bold text-white hover:bg-[#B9141B] transition-colors cursor-pointer disabled:opacity-60"
+              onClick={() => handleSwitchTab('credentials')}
+              className={`min-h-[40px] rounded-lg px-3 py-2 text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                tab === 'credentials'
+                  ? 'bg-white text-zinc-900 shadow-xs'
+                  : 'text-zinc-600 hover:text-zinc-900'
+              }`}
             >
-              <LogIn className="h-5 w-5" />
-              <span>{authLoading ? 'جاري التحقق من الحساب...' : 'تسجيل الدخول بحساب Google'}</span>
+              <KeyRound className="h-3.5 w-3.5 shrink-0 text-[#D91B23]" />
+              <span>دخول بالرقم الوظيفي</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSwitchTab('first_time')}
+              className={`min-h-[40px] rounded-lg px-3 py-2 text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                tab === 'first_time'
+                  ? 'bg-white text-zinc-900 shadow-xs'
+                  : 'text-zinc-600 hover:text-zinc-900'
+              }`}
+            >
+              <UserPlus className="h-3.5 w-3.5 shrink-0 text-[#D91B23]" />
+              <span>التسجيل لأول مرة</span>
             </button>
           </div>
 
+          {activeError && (
+            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-700 leading-relaxed">
+              {activeError}
+            </div>
+          )}
+
+          {tab === 'credentials' ? (
+            <form onSubmit={handleCredentialSubmit} className="mt-5 space-y-4">
+              {linkedEmail && (
+                <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 py-2.5 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[11px] text-zinc-500">البريد المرتبط على هذا الجهاز:</div>
+                    <div className="text-xs font-semibold text-zinc-800 truncate flex items-center gap-1">
+                      <Mail className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                      <span className="truncate">{linkedEmail}</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => void handleUnlink()}
+                    className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-zinc-700 hover:bg-zinc-100 cursor-pointer disabled:opacity-50"
+                    title="فك ربط البريد الحالي والدخول بحساب آخر"
+                  >
+                    <Unlink className="h-3 w-3" />
+                    <span>تغيير</span>
+                  </button>
+                </div>
+              )}
+
+              <div>
+                <label
+                  htmlFor="login-emp-no"
+                  className="block text-xs font-semibold text-zinc-700 mb-1.5"
+                >
+                  الرقم الوظيفي
+                </label>
+                <input
+                  id="login-emp-no"
+                  type="text"
+                  required
+                  autoComplete="username"
+                  value={employeeNumber}
+                  onChange={(e) => setEmployeeNumber(e.target.value)}
+                  placeholder="مثال: EMP-101"
+                  className="w-full min-h-[44px] rounded-xl border border-zinc-300 bg-white px-3.5 text-sm font-semibold text-zinc-900 placeholder:font-normal placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#D91B23]/20 focus:border-[#D91B23]"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="login-password"
+                  className="block text-xs font-semibold text-zinc-700 mb-1.5"
+                >
+                  كلمة المرور
+                </label>
+                <div className="relative">
+                  <input
+                    id="login-password"
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="أدخل كلمة المرور"
+                    className="w-full min-h-[44px] rounded-xl border border-zinc-300 bg-white pl-10 pr-3.5 text-sm font-semibold text-zinc-900 placeholder:font-normal placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#D91B23]/20 focus:border-[#D91B23]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((prev) => !prev)}
+                    aria-label={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+                    className="absolute inset-y-0 left-0 px-3 flex items-center text-zinc-400 hover:text-zinc-700 cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {!linkedEmail && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-3.5 py-2.5 text-[11px] text-amber-800 leading-relaxed">
+                  عند الدخول من جهاز جديد، سيُطلب تأكيد بريدك الإلكتروني المرتبط عبر Google مرة واحدة فقط.
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isBusy}
+                className="w-full min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-[#D91B23] px-5 py-3 text-sm font-bold text-white hover:bg-[#B9141B] transition-colors cursor-pointer disabled:opacity-60"
+              >
+                <LogIn className="h-4 w-4" />
+                <span>{isBusy ? 'جاري التحقق من البيانات...' : 'تسجيل الدخول'}</span>
+              </button>
+            </form>
+          ) : (
+            <div className="mt-5 space-y-4">
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-xs text-zinc-700 space-y-2 leading-relaxed">
+                <div className="font-bold text-zinc-900 flex items-center gap-1.5">
+                  <Link2 className="h-4 w-4 text-[#D91B23]" />
+                  <span>خطوات التسجيل لأول مرة:</span>
+                </div>
+                <ol className="list-decimal list-inside space-y-1 text-zinc-600">
+                  <li>الموافقة على ربط بريدك الإلكتروني عبر Google بالتطبيق.</li>
+                  <li>تقوم الإدارة بإدخال بياناتك الأساسية ورقم الهاتف وتفعيل حسابك (البريد المالك يتفعل تلقائياً).</li>
+                  <li>بعد التفعيل تسجّل دخولك دائماً بالرقم الوظيفي وكلمة المرور.</li>
+                </ol>
+              </div>
+
+              <label className="flex items-start gap-2.5 rounded-xl border border-zinc-200 bg-white p-3.5 cursor-pointer hover:bg-zinc-50 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={emailLinkConsent}
+                  onChange={(e) => {
+                    setEmailLinkConsent(e.target.checked);
+                    if (e.target.checked) setLocalError(null);
+                  }}
+                  className="mt-0.5 h-4 w-4 rounded border-zinc-300 text-[#D91B23] focus:ring-[#D91B23]"
+                />
+                <span className="text-xs font-medium text-zinc-800 leading-relaxed">
+                  أوافق على ربط بريدي الإلكتروني عبر Google بحسابي الوظيفي في نظام {BRAND_NAME} وإرسال طلب الانضمام للإدارة لاعتماده.
+                </span>
+              </label>
+
+              <button
+                type="button"
+                onClick={() => void handleFirstTimeGoogleLink()}
+                disabled={isBusy}
+                className="w-full min-h-[46px] flex items-center justify-center gap-2.5 rounded-xl bg-[#D91B23] px-5 py-3 text-sm font-bold text-white hover:bg-[#B9141B] transition-colors cursor-pointer disabled:opacity-60"
+              >
+                <Link2 className="h-4 w-4" />
+                <span>
+                  {isBusy ? 'جاري ربط البريد الإلكتروني...' : 'الموافقة وربط البريد عبر Google'}
+                </span>
+              </button>
+            </div>
+          )}
+
           <div className="mt-6 flex items-center justify-center gap-2 text-xs text-zinc-500">
             <ShieldCheck className="h-4 w-4 text-emerald-600 shrink-0" />
-            <span>حسابات مستقلة لكل موظف · صلاحيات محمية على مستوى الخادم</span>
+            <span>حسابات مستقلة لكل موظف · كلمات مرور محمية وصلاحيات إدارية معتمدة</span>
           </div>
         </div>
       </main>
