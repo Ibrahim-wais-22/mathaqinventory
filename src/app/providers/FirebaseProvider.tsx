@@ -49,6 +49,36 @@ import { ensureInitialSeedData } from '../../services/inventory/seedService';
 
 const LOCK_STORAGE_KEY = 'mathaq_locked_uid';
 
+function getAuthUserEmail(user: User | null | undefined): string {
+  if (!user) return '';
+  return (
+    user.email ||
+    user.providerData?.find((p) => !!p?.email)?.email ||
+    ''
+  ).trim();
+}
+
+function isBootstrapOwnerEmail(email?: string | null): boolean {
+  return (email || '').trim().toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
+}
+
+function formatAuthErrorMessage(err: unknown, fallback: string): string {
+  const code = (err as { code?: string } | null)?.code || '';
+  if (code === 'auth/popup-blocked') {
+    return 'تم حظر نافذة تسجيل الدخول المنبثقة من المتصفح. يرجى السماح بالنوافذ المنبثقة ثم المحاولة مجدداً.';
+  }
+  if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+    return 'تم إغلاق نافذة Google قبل إتمام تسجيل الدخول.';
+  }
+  if (code === 'auth/unauthorized-domain') {
+    return 'نطاق الموقع غير مصرح به في إعدادات مصادقة Firebase.';
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'تعذر الاتصال بالإنترنت أثناء تسجيل الدخول. تحقق من الشبكة وحاول مجدداً.';
+  }
+  return formatActionError(err, fallback);
+}
+
 interface FirebaseContextValue {
   firebaseUser: User | null;
   account: UserAccount | null;
@@ -69,6 +99,7 @@ interface FirebaseContextValue {
   categories: Category[];
   products: Product[];
   signInWithGoogle: () => Promise<void>;
+  signInOwnerWithGoogle: () => Promise<void>;
   signInWithCredentials: (employeeNumber: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   unlinkGoogleAccount: () => Promise<void>;
@@ -130,14 +161,28 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setAccount(resolved);
 
         if (!credentialLoginInProgressRef.current) {
-          let lockedUid: string | null = null;
-          try {
-            lockedUid = window.localStorage.getItem(LOCK_STORAGE_KEY);
-          } catch {
-            lockedUid = null;
+          const authEmail = getAuthUserEmail(user);
+          const isOwnerEmail =
+            isBootstrapOwnerEmail(authEmail) || isBootstrapOwnerEmail(resolved.email);
+
+          let unlocked = true;
+          if (isOwnerEmail) {
+            try {
+              window.localStorage.removeItem(LOCK_STORAGE_KEY);
+            } catch {
+              // ignore storage errors
+            }
+            unlocked = true;
+          } else {
+            let lockedUid: string | null = null;
+            try {
+              lockedUid = window.localStorage.getItem(LOCK_STORAGE_KEY);
+            } catch {
+              lockedUid = null;
+            }
+            unlocked = lockedUid !== user.uid;
           }
 
-          const unlocked = lockedUid !== user.uid;
           setIsCredentialUnlocked(unlocked);
 
           if (
@@ -145,12 +190,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             resolved.status === 'active' &&
             (resolved.role === 'ceo' || resolved.role === 'branch_manager')
           ) {
-            await ensureInitialSeedData(resolved);
+            try {
+              await ensureInitialSeedData(resolved);
+            } catch (seedErr) {
+              console.warn('Initial seed warning:', seedErr);
+            }
           }
         }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'تعذر تحميل بيانات الحساب.';
-        setAuthError(msg);
+        setAuthError(formatAuthErrorMessage(err, 'تعذر تحميل بيانات الحساب.'));
       } finally {
         if (!credentialLoginInProgressRef.current) {
           setAuthLoading(false);
@@ -169,7 +217,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       userRef,
       (snap) => {
         if (snap.exists()) {
-          setAccount({ ...(snap.data() as UserAccount), uid: snap.id });
+          const nextAcc = { ...(snap.data() as UserAccount), uid: snap.id };
+          setAccount(nextAcc);
+          if (
+            isBootstrapOwnerEmail(getAuthUserEmail(firebaseUser)) ||
+            isBootstrapOwnerEmail(nextAcc.email)
+          ) {
+            setIsCredentialUnlocked(true);
+          }
         }
       },
       (error) => {
@@ -285,6 +340,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const signInWithGoogle = async () => {
     setAuthError(null);
+    credentialLoginInProgressRef.current = true;
     try {
       window.localStorage.removeItem(LOCK_STORAGE_KEY);
     } catch {
@@ -301,12 +357,77 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           resolved.status === 'active' &&
           (resolved.role === 'ceo' || resolved.role === 'branch_manager')
         ) {
-          await ensureInitialSeedData(resolved);
+          try {
+            await ensureInitialSeedData(resolved);
+          } catch (seedErr) {
+            console.warn('Initial seed warning:', seedErr);
+          }
         }
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'فشل ربط البريد عبر Google.';
-      setAuthError(msg);
+      setAuthError(formatAuthErrorMessage(err, 'فشل ربط البريد عبر Google.'));
+    } finally {
+      credentialLoginInProgressRef.current = false;
+    }
+  };
+
+  const signInOwnerWithGoogle = async () => {
+    setAuthError(null);
+    credentialLoginInProgressRef.current = true;
+    try {
+      let user = auth.currentUser;
+      if (!user || !isBootstrapOwnerEmail(getAuthUserEmail(user))) {
+        const cred = await signInWithPopup(auth, googleProvider);
+        user = cred.user;
+      }
+      if (!user) return;
+
+      if (isBootstrapOwnerEmail(getAuthUserEmail(user))) {
+        try {
+          window.localStorage.removeItem(LOCK_STORAGE_KEY);
+        } catch {
+          // ignore storage errors
+        }
+        const resolved = await resolveOrProvisionEmployee(user);
+        setFirebaseUser(user);
+        setAccount(resolved);
+        setIsCredentialUnlocked(true);
+        try {
+          await ensureInitialSeedData(resolved);
+        } catch (seedErr) {
+          console.warn('Initial seed warning:', seedErr);
+        }
+        return;
+      }
+
+      // Non-owner used direct Google button: check if already registered without creating unconsented pending account
+      const existingSnap = await getDoc(doc(db, 'users', user.uid));
+      if (existingSnap.exists() && existingSnap.data()?.status === 'active') {
+        const existingProfile = {
+          ...(existingSnap.data() as UserAccount),
+          uid: existingSnap.id,
+        };
+        try {
+          window.localStorage.setItem(LOCK_STORAGE_KEY, user.uid);
+        } catch {
+          // ignore
+        }
+        setFirebaseUser(user);
+        setAccount(existingProfile);
+        setIsCredentialUnlocked(false);
+        setAuthError('تم ربط البريد. أدخل الرقم الوظيفي وكلمة المرور للدخول.');
+        return;
+      }
+
+      await signOut(auth);
+      setFirebaseUser(null);
+      setAccount(null);
+      setIsCredentialUnlocked(false);
+      setAuthError('هذا الخيار مخصص لحساب المالك فقط. للموظفين يرجى استخدام تبويب "أول مرة".');
+    } catch (err) {
+      setAuthError(formatAuthErrorMessage(err, 'فشل تسجيل الدخول عبر Google.'));
+    } finally {
+      credentialLoginInProgressRef.current = false;
     }
   };
 
@@ -334,6 +455,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!profile || profile.uid !== user.uid) {
         profile = await resolveOrProvisionEmployee(user);
         setAccount(profile);
+      }
+
+      if (isBootstrapOwnerEmail(getAuthUserEmail(user)) || isBootstrapOwnerEmail(profile.email)) {
+        try {
+          window.localStorage.removeItem(LOCK_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+        setIsCredentialUnlocked(true);
+        setAuthError(null);
+        try {
+          await ensureInitialSeedData(profile);
+        } catch (seedErr) {
+          console.warn('Initial seed warning:', seedErr);
+        }
+        return;
       }
 
       if (profile.status !== 'active') {
@@ -382,7 +519,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
         setIsCredentialUnlocked(false);
         setAuthError(
-          'لم يتم تعيين رقم الهاتف وكلمة المرور لهذا الحساب بعد. استخدم تبويب "التسجيل لأول مرة (ربط البريد)" للدخول وتحديث بيانات الحساب.'
+          'لم يتم تعيين رقم الهاتف وكلمة المرور لهذا الحساب بعد. استخدم تبويب "أول مرة" لربط البريد وتحديث بيانات الحساب.'
         );
         return;
       }
@@ -407,11 +544,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setAuthError(null);
 
       if (profile.role === 'ceo' || profile.role === 'branch_manager') {
-        await ensureInitialSeedData(profile);
+        try {
+          await ensureInitialSeedData(profile);
+        } catch (seedErr) {
+          console.warn('Initial seed warning:', seedErr);
+        }
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'تعذر تسجيل الدخول. يرجى المحاولة مجدداً.';
-      setAuthError(msg);
+      setAuthError(formatAuthErrorMessage(err, 'تعذر تسجيل الدخول. يرجى المحاولة مجدداً.'));
     } finally {
       credentialLoginInProgressRef.current = false;
     }
@@ -419,6 +559,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const logout = async () => {
     setAuthError(null);
+    if (isBootstrapOwnerEmail(firebaseUser?.email || account?.email)) {
+      await unlinkGoogleAccount();
+      return;
+    }
     if (firebaseUser) {
       try {
         window.localStorage.setItem(LOCK_STORAGE_KEY, firebaseUser.uid);
@@ -515,6 +659,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         categories,
         products,
         signInWithGoogle,
+        signInOwnerWithGoogle,
         signInWithCredentials,
         logout,
         unlinkGoogleAccount,
@@ -528,50 +673,82 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
 async function resolveOrProvisionEmployee(user: User): Promise<UserAccount> {
   const userRef = doc(db, 'users', user.uid);
-  const existingSnap = await getDoc(userRef);
-  const tokenEmail = user.email || '';
-  const emailLower = tokenEmail.trim().toLowerCase();
+  const tokenEmail = getAuthUserEmail(user) || '';
+  const emailLower = tokenEmail.toLowerCase();
+  const isOwner = emailLower === BOOTSTRAP_ADMIN_EMAIL;
+
+  let existingSnap;
+  try {
+    existingSnap = await getDoc(userRef);
+  } catch (err) {
+    if (isOwner) {
+      return {
+        uid: user.uid,
+        employeeNumber: 'EMP-001',
+        username: 'mathaqinventory',
+        fullName: (user.displayName || 'المدير التنفيذي — المذاق اليمني').slice(0, 120),
+        email: tokenEmail || BOOTSTRAP_ADMIN_EMAIL,
+        department: 'management',
+        role: 'ceo',
+        branchId: DEFAULT_BRANCH_ID,
+        status: 'active',
+        permissions: [...ALL_PERMISSIONS],
+      };
+    }
+    throw err;
+  }
 
   if (existingSnap.exists()) {
     const data = { ...(existingSnap.data() as UserAccount), uid: existingSnap.id };
     const missingAnyOwnerPerm = ALL_PERMISSIONS.some((p) => !data.permissions?.includes(p));
     if (
-      emailLower === BOOTSTRAP_ADMIN_EMAIL &&
+      isOwner &&
       (data.role !== 'ceo' ||
         data.department !== 'management' ||
         data.status !== 'active' ||
         missingAnyOwnerPerm)
     ) {
       const perms = [...ALL_PERMISSIONS];
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'admins', user.uid), {
-        uid: user.uid,
-        role: 'ceo',
-        email: tokenEmail,
-        createdAt: serverTimestamp(),
-      });
-      batch.update(userRef, {
-        role: 'ceo',
-        department: 'management',
-        status: 'active',
-        permissions: perms,
-        updatedAt: serverTimestamp(),
-      });
-      await batch.commit();
+      try {
+        const adminRef = doc(db, 'admins', user.uid);
+        const adminSnap = await getDoc(adminRef);
+        const batch = writeBatch(db);
+        if (!adminSnap.exists()) {
+          batch.set(adminRef, {
+            uid: user.uid,
+            role: 'ceo',
+            email: tokenEmail || BOOTSTRAP_ADMIN_EMAIL,
+            createdAt: serverTimestamp(),
+          });
+        }
+        batch.update(userRef, {
+          role: 'ceo',
+          department: 'management',
+          status: 'active',
+          permissions: perms,
+          updatedAt: serverTimestamp(),
+        });
+        await batch.commit();
+      } catch (err) {
+        console.warn('Owner profile sync warning:', err);
+      }
       return { ...data, role: 'ceo', department: 'management', status: 'active', permissions: perms };
     }
     return data;
   }
 
   // Bootstrap Executive Admin (Owner)
-  if (emailLower === BOOTSTRAP_ADMIN_EMAIL) {
+  if (isOwner) {
     const perms = [...ALL_PERMISSIONS];
+    const ownerEmail = tokenEmail || BOOTSTRAP_ADMIN_EMAIL;
+    const ownerUsername = (emailLower.split('@')[0] || 'ceo').slice(0, 80);
+    const ownerFullName = (user.displayName || 'المدير التنفيذي — المذاق اليمني').slice(0, 120);
     const newAdmin: Record<string, unknown> = {
       uid: user.uid,
       employeeNumber: 'EMP-001',
-      username: emailLower.split('@')[0] || 'ceo',
-      fullName: user.displayName || 'المدير التنفيذي — المذاق اليمني',
-      email: tokenEmail,
+      username: ownerUsername,
+      fullName: ownerFullName,
+      email: ownerEmail,
       department: 'management',
       role: 'ceo',
       branchId: DEFAULT_BRANCH_ID,
@@ -580,15 +757,41 @@ async function resolveOrProvisionEmployee(user: User): Promise<UserAccount> {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
-    await setDoc(doc(db, 'admins', user.uid), {
+    try {
+      const adminRef = doc(db, 'admins', user.uid);
+      const adminSnap = await getDoc(adminRef);
+      if (!adminSnap.exists()) {
+        await setDoc(adminRef, {
+          uid: user.uid,
+          role: 'ceo',
+          email: ownerEmail,
+          createdAt: serverTimestamp(),
+        });
+      }
+    } catch (adminErr) {
+      console.warn('Owner admins doc check warning:', adminErr);
+    }
+    try {
+      await setDoc(userRef, newAdmin);
+      const created = await getDoc(userRef);
+      if (created.exists()) {
+        return { ...(created.data() as UserAccount), uid: created.id };
+      }
+    } catch (userErr) {
+      console.warn('Owner user doc create warning:', userErr);
+    }
+    return {
       uid: user.uid,
+      employeeNumber: 'EMP-001',
+      username: ownerUsername,
+      fullName: ownerFullName,
+      email: ownerEmail,
+      department: 'management',
       role: 'ceo',
-      email: tokenEmail,
-      createdAt: serverTimestamp(),
-    });
-    await setDoc(userRef, newAdmin);
-    const created = await getDoc(userRef);
-    return { ...(created.data() as UserAccount), uid: created.id };
+      branchId: DEFAULT_BRANCH_ID,
+      status: 'active',
+      permissions: perms,
+    };
   }
 
   // Check if pre-invited by Executive Admin

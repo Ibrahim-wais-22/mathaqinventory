@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { FirebaseProvider, useFirebase } from './app/providers/FirebaseProvider';
 import { AppShell } from './app/layouts/AppShell';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
+import { BOOTSTRAP_ADMIN_EMAIL } from './constants/departments';
 import { LoginScreen } from './modules/authentication/LoginScreen';
 import { PendingActivationScreen } from './modules/authentication/PendingActivationScreen';
 import { FactoryWorkspace } from './modules/factory/FactoryWorkspace';
@@ -48,11 +49,15 @@ const AuthenticatedApp: React.FC = () => {
     );
   }
 
-  if (!firebaseUser || !account || !isCredentialUnlocked) {
+  const isOwnerSession =
+    !!firebaseUser &&
+    (firebaseUser.email || account?.email || '').trim().toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
+
+  if (!firebaseUser || !account || (!isCredentialUnlocked && !isOwnerSession)) {
     return <LoginScreen />;
   }
 
-  if (account.status !== 'active') {
+  if (account.status !== 'active' && !isOwnerSession) {
     return <PendingActivationScreen />;
   }
 

@@ -27,70 +27,98 @@ export async function ensureInitialSeedData(adminUser: UserAccount): Promise<voi
     }
 
     const batch = writeBatch(db);
+    let writeCount = 0;
 
     const branchRef = doc(db, 'branches', DEFAULT_BRANCH_ID);
-    batch.set(branchRef, {
-      name: DEFAULT_BRANCH_NAME,
-      code: 'MAIN_01',
-      timezone: TIMEZONE,
-      isActive: true,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-
-    for (const cat of SEED_CATEGORIES) {
-      batch.set(doc(db, 'categories', cat.id), {
-        name: cat.name,
-        sortOrder: cat.sortOrder,
+    const branchSnap = await getDoc(branchRef);
+    if (!branchSnap.exists()) {
+      batch.set(branchRef, {
+        name: DEFAULT_BRANCH_NAME,
+        code: 'MAIN_01',
+        timezone: TIMEZONE,
         isActive: true,
-        createdBy: adminUser.uid,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+      writeCount++;
+    }
+
+    for (const cat of SEED_CATEGORIES) {
+      const catRef = doc(db, 'categories', cat.id);
+      const catSnap = await getDoc(catRef);
+      if (!catSnap.exists()) {
+        batch.set(catRef, {
+          name: cat.name,
+          sortOrder: cat.sortOrder,
+          isActive: true,
+          createdBy: adminUser.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        writeCount++;
+      }
     }
 
     for (const prod of SEED_PRODUCTS) {
-      batch.set(doc(db, 'products', prod.id), {
-        name: prod.name,
-        categoryId: prod.categoryId,
-        unit: prod.unit,
-        isActive: true,
-        approvalStatus: 'approved',
-        allowedDepartments: prod.allowedDepartments,
-        createdBy: adminUser.uid,
-        createdByName: adminUser.fullName,
-        technicalApprovedBy: adminUser.uid,
-        technicalApprovedByName: adminUser.fullName,
-        adminApprovedBy: adminUser.uid,
-        adminApprovedByName: adminUser.fullName,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      const prodRef = doc(db, 'products', prod.id);
+      const prodSnap = await getDoc(prodRef);
+      if (!prodSnap.exists()) {
+        batch.set(prodRef, {
+          name: prod.name,
+          categoryId: prod.categoryId,
+          unit: prod.unit,
+          isActive: true,
+          approvalStatus: 'approved',
+          allowedDepartments: prod.allowedDepartments,
+          createdBy: adminUser.uid,
+          createdByName: adminUser.fullName.slice(0, 120),
+          technicalApprovedBy: adminUser.uid,
+          technicalApprovedByName: adminUser.fullName.slice(0, 120),
+          adminApprovedBy: adminUser.uid,
+          adminApprovedByName: adminUser.fullName.slice(0, 120),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        writeCount++;
+      }
     }
 
-    batch.set(settingsRef, {
-      timezone: TIMEZONE,
-      activeBranchId: DEFAULT_BRANCH_ID,
-      seeded: true,
-      updatedBy: adminUser.uid,
-      updatedAt: serverTimestamp(),
-    });
+    if (!snap.exists()) {
+      batch.set(settingsRef, {
+        timezone: TIMEZONE,
+        activeBranchId: DEFAULT_BRANCH_ID,
+        seeded: true,
+        updatedBy: adminUser.uid,
+        updatedAt: serverTimestamp(),
+      });
+      writeCount++;
+    } else {
+      batch.update(settingsRef, {
+        timezone: TIMEZONE,
+        activeBranchId: DEFAULT_BRANCH_ID,
+        seeded: true,
+        updatedBy: adminUser.uid,
+        updatedAt: serverTimestamp(),
+      });
+      writeCount++;
+    }
 
-    const auditRef = doc(db, 'auditLogs', `seed_${Date.now()}`);
-    batch.set(auditRef, {
-      branchId: DEFAULT_BRANCH_ID,
-      department: 'management',
-      actorUid: adminUser.uid,
-      actorName: adminUser.fullName,
-      actorRole: adminUser.role,
-      action: 'تهيئة_البيانات_الأساسية',
-      targetCollection: 'systemSettings',
-      targetId: 'main',
-      newValueSummary: `تهيئة ${SEED_CATEGORIES.length} مجموعات و${SEED_PRODUCTS.length} صنفاً معتمداً`,
-      createdAt: serverTimestamp(),
-    });
-
-    await batch.commit();
+    if (writeCount > 0) {
+      const auditRef = doc(db, 'auditLogs', `seed_${Date.now()}`);
+      batch.set(auditRef, {
+        branchId: DEFAULT_BRANCH_ID,
+        department: 'management',
+        actorUid: adminUser.uid,
+        actorName: adminUser.fullName.slice(0, 120),
+        actorRole: adminUser.role,
+        action: 'تهيئة_البيانات_الأساسية',
+        targetCollection: 'systemSettings',
+        targetId: 'main',
+        newValueSummary: `تهيئة ${SEED_CATEGORIES.length} مجموعات و${SEED_PRODUCTS.length} صنفاً معتمداً`,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'systemSettings/main');
   }
