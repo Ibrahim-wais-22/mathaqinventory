@@ -200,9 +200,13 @@ export const AppShell: React.FC<{
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 p-4 lg:p-8 pb-10 max-w-7xl w-full mx-auto">
+      <main className="flex-1 p-4 lg:p-8 pb-6 max-w-7xl w-full mx-auto">
         {children}
       </main>
+
+      <footer className="py-3 px-4 text-center text-[11px] font-medium text-zinc-400 no-print">
+        بواسطة م.ابراهيم ويس
+      </footer>
 
       <OfflineIndicator />
 

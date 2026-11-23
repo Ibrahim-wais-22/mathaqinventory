@@ -249,6 +249,10 @@ export const LoginScreen: React.FC = () => {
           )}
         </div>
       </main>
+
+      <footer className="pt-2 pb-1 text-center text-[11px] font-medium text-zinc-400">
+        بواسطة م.ابراهيم ويس
+      </footer>
     </div>
   );
 };
