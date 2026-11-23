@@ -24,32 +24,22 @@ export const PendingActivationScreen: React.FC = () => {
         </div>
 
         <h2 className="mt-4 text-xl font-bold text-zinc-900 font-display">
-          {isSuspended ? 'الحساب موقوف حالياً' : 'تم ربط البريد — بانتظار التفعيل الإداري'}
+          {isSuspended ? 'الحساب موقوف حالياً' : 'بانتظار التفعيل'}
         </h2>
 
         <p className="mt-2 text-sm text-zinc-600 leading-relaxed">
           {isSuspended
-            ? 'تم إيقاف صلاحية الدخول لهذا الحساب. يرجى مراجعة المدير التنفيذي أو مدير الفرع.'
-            : 'تمت الموافقة على ربط بريدك الإلكتروني بنجاح. بانتظار قيام الإدارة بإدخال بياناتك الأساسية (بما فيها الرقم الوظيفي ورقم الهاتف) وتفعيل حسابك. بعد التفعيل سيكون دخولك بالرقم الوظيفي وكلمة المرور المبدئية هي رقم هاتفك.'}
+            ? 'تم إيقاف صلاحية الدخول لهذا الحساب. يرجى مراجعة الإدارة.'
+            : 'تم ربط بريدك الإلكتروني بنجاح، وحسابك بانتظار موافقة الإدارة.'}
         </p>
 
         {account && (
           <div className="mt-5 rounded-xl bg-zinc-50 border border-zinc-200 p-4 text-right text-xs text-zinc-600 space-y-1.5">
             <div>
-              <span className="font-semibold text-zinc-800">البريد المرتبط:</span> {account.email}
+              <span className="font-semibold text-zinc-800">البريد:</span> {account.email}
             </div>
             <div>
-              <span className="font-semibold text-zinc-800">الرقم الوظيفي الحالي:</span>{' '}
-              <span className="tabular-nums font-mono">{account.employeeNumber}</span>
-            </div>
-            {account.phoneNumber && (
-              <div>
-                <span className="font-semibold text-zinc-800">رقم الهاتف:</span>{' '}
-                <span className="tabular-nums font-mono">{account.phoneNumber}</span>
-              </div>
-            )}
-            <div>
-              <span className="font-semibold text-zinc-800">حالة الحساب:</span>{' '}
+              <span className="font-semibold text-zinc-800">الحالة:</span>{' '}
               {ACCOUNT_STATUS_LABELS[account.status]}
             </div>
           </div>

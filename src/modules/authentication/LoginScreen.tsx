@@ -6,11 +6,10 @@ import {
   Link2,
   LogIn,
   Mail,
-  ShieldCheck,
   Unlink,
   UserPlus,
 } from 'lucide-react';
-import { BRAND_ENGLISH, BRAND_NAME } from '../../constants/departments';
+import { BRAND_NAME } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { BrandLogo } from '../../components/common/BrandLogo';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
@@ -67,7 +66,7 @@ export const LoginScreen: React.FC = () => {
     clearAuthError();
 
     if (!emailLinkConsent) {
-      setLocalError('يرجى الموافقة أولاً على ربط بريدك الإلكتروني بالتطبيق للمتابعة.');
+      setLocalError('يرجى الموافقة على ربط البريد الإلكتروني للمتابعة.');
       return;
     }
 
@@ -93,7 +92,7 @@ export const LoginScreen: React.FC = () => {
   const isBusy = authLoading || submitting;
 
   return (
-    <div className="min-h-screen bg-[#FAFAFA] flex flex-col justify-between p-4 sm:p-6" dir="rtl">
+    <div className="min-h-screen bg-[#FAFAFA] flex flex-col p-4 sm:p-6" dir="rtl">
       <div className="flex items-center justify-between max-w-5xl w-full mx-auto">
         <div className="flex items-center gap-3">
           <BrandLogo size="sm" />
@@ -107,14 +106,11 @@ export const LoginScreen: React.FC = () => {
           <div className="flex flex-col items-center text-center">
             <BrandLogo size="lg" />
             <h1 className="mt-4 text-2xl font-extrabold text-zinc-900 font-display text-balance">
-              نظام متابعة الجرد اليومي
+              تسجيل الدخول
             </h1>
-            <p className="mt-1 text-sm text-zinc-500">
-              {BRAND_NAME} · {BRAND_ENGLISH}
-            </p>
+            <p className="mt-1 text-sm text-zinc-500">{BRAND_NAME}</p>
           </div>
 
-          {/* Mode Tabs */}
           <div className="mt-6 grid grid-cols-2 gap-1.5 rounded-xl bg-zinc-100 p-1">
             <button
               type="button"
@@ -126,7 +122,7 @@ export const LoginScreen: React.FC = () => {
               }`}
             >
               <KeyRound className="h-3.5 w-3.5 shrink-0 text-[#D91B23]" />
-              <span>دخول بالرقم الوظيفي</span>
+              <span>دخول</span>
             </button>
             <button
               type="button"
@@ -138,7 +134,7 @@ export const LoginScreen: React.FC = () => {
               }`}
             >
               <UserPlus className="h-3.5 w-3.5 shrink-0 text-[#D91B23]" />
-              <span>التسجيل لأول مرة</span>
+              <span>أول مرة</span>
             </button>
           </div>
 
@@ -151,20 +147,16 @@ export const LoginScreen: React.FC = () => {
           {tab === 'credentials' ? (
             <form onSubmit={handleCredentialSubmit} className="mt-5 space-y-4">
               {linkedEmail && (
-                <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 py-2.5 flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-[11px] text-zinc-500">البريد المرتبط على هذا الجهاز:</div>
-                    <div className="text-xs font-semibold text-zinc-800 truncate flex items-center gap-1">
-                      <Mail className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-                      <span className="truncate">{linkedEmail}</span>
-                    </div>
+                <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 flex items-center justify-between gap-2">
+                  <div className="min-w-0 flex items-center gap-1.5 text-xs font-medium text-zinc-700">
+                    <Mail className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                    <span className="truncate">{linkedEmail}</span>
                   </div>
                   <button
                     type="button"
                     disabled={isBusy}
                     onClick={() => void handleUnlink()}
-                    className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-zinc-700 hover:bg-zinc-100 cursor-pointer disabled:opacity-50"
-                    title="فك ربط البريد الحالي والدخول بحساب آخر"
+                    className="shrink-0 inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/60 cursor-pointer disabled:opacity-50"
                   >
                     <Unlink className="h-3 w-3" />
                     <span>تغيير</span>
@@ -186,7 +178,7 @@ export const LoginScreen: React.FC = () => {
                   autoComplete="username"
                   value={employeeNumber}
                   onChange={(e) => setEmployeeNumber(e.target.value)}
-                  placeholder="مثال: EMP-101"
+                  placeholder="أدخل الرقم الوظيفي"
                   className="w-full min-h-[44px] rounded-xl border border-zinc-300 bg-white px-3.5 text-sm font-semibold text-zinc-900 placeholder:font-normal placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#D91B23]/20 focus:border-[#D91B23]"
                 />
               </div>
@@ -220,36 +212,18 @@ export const LoginScreen: React.FC = () => {
                 </div>
               </div>
 
-              {!linkedEmail && (
-                <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-3.5 py-2.5 text-[11px] text-amber-800 leading-relaxed">
-                  عند الدخول من جهاز جديد، سيُطلب تأكيد بريدك الإلكتروني المرتبط عبر Google مرة واحدة فقط.
-                </div>
-              )}
-
               <button
                 type="submit"
                 disabled={isBusy}
                 className="w-full min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-[#D91B23] px-5 py-3 text-sm font-bold text-white hover:bg-[#B9141B] transition-colors cursor-pointer disabled:opacity-60"
               >
                 <LogIn className="h-4 w-4" />
-                <span>{isBusy ? 'جاري التحقق من البيانات...' : 'تسجيل الدخول'}</span>
+                <span>{isBusy ? 'جاري الدخول...' : 'تسجيل الدخول'}</span>
               </button>
             </form>
           ) : (
             <div className="mt-5 space-y-4">
-              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-xs text-zinc-700 space-y-2 leading-relaxed">
-                <div className="font-bold text-zinc-900 flex items-center gap-1.5">
-                  <Link2 className="h-4 w-4 text-[#D91B23]" />
-                  <span>خطوات التسجيل لأول مرة:</span>
-                </div>
-                <ol className="list-decimal list-inside space-y-1 text-zinc-600">
-                  <li>الموافقة على ربط بريدك الإلكتروني عبر Google بالتطبيق.</li>
-                  <li>تقوم الإدارة بإدخال بياناتك الأساسية ورقم الهاتف وتفعيل حسابك (البريد المالك يتفعل تلقائياً).</li>
-                  <li>بعد التفعيل تسجّل دخولك دائماً بالرقم الوظيفي وكلمة المرور.</li>
-                </ol>
-              </div>
-
-              <label className="flex items-start gap-2.5 rounded-xl border border-zinc-200 bg-white p-3.5 cursor-pointer hover:bg-zinc-50 transition-colors">
+              <label className="flex items-center gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 cursor-pointer hover:bg-zinc-50 transition-colors">
                 <input
                   type="checkbox"
                   checked={emailLinkConsent}
@@ -257,10 +231,10 @@ export const LoginScreen: React.FC = () => {
                     setEmailLinkConsent(e.target.checked);
                     if (e.target.checked) setLocalError(null);
                   }}
-                  className="mt-0.5 h-4 w-4 rounded border-zinc-300 text-[#D91B23] focus:ring-[#D91B23]"
+                  className="h-4 w-4 rounded border-zinc-300 text-[#D91B23] focus:ring-[#D91B23]"
                 />
-                <span className="text-xs font-medium text-zinc-800 leading-relaxed">
-                  أوافق على ربط بريدي الإلكتروني عبر Google بحسابي الوظيفي في نظام {BRAND_NAME} وإرسال طلب الانضمام للإدارة لاعتماده.
+                <span className="text-xs font-semibold text-zinc-800">
+                  أوافق على ربط بريدي الإلكتروني عبر Google
                 </span>
               </label>
 
@@ -271,23 +245,12 @@ export const LoginScreen: React.FC = () => {
                 className="w-full min-h-[46px] flex items-center justify-center gap-2.5 rounded-xl bg-[#D91B23] px-5 py-3 text-sm font-bold text-white hover:bg-[#B9141B] transition-colors cursor-pointer disabled:opacity-60"
               >
                 <Link2 className="h-4 w-4" />
-                <span>
-                  {isBusy ? 'جاري ربط البريد الإلكتروني...' : 'الموافقة وربط البريد عبر Google'}
-                </span>
+                <span>{isBusy ? 'جاري الربط...' : 'ربط البريد عبر Google'}</span>
               </button>
             </div>
           )}
-
-          <div className="mt-6 flex items-center justify-center gap-2 text-xs text-zinc-500">
-            <ShieldCheck className="h-4 w-4 text-emerald-600 shrink-0" />
-            <span>حسابات مستقلة لكل موظف · كلمات مرور محمية وصلاحيات إدارية معتمدة</span>
-          </div>
         </div>
       </main>
-
-      <footer className="text-center text-xs text-zinc-400">
-        {BRAND_NAME} · المنطقة الزمنية المعتمدة: Asia/Aden
-      </footer>
     </div>
   );
 };
