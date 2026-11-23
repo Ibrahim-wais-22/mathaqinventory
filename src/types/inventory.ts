@@ -111,11 +111,27 @@ export interface Category {
   updatedAt?: Timestamp;
 }
 
+export interface ProductUnitOption {
+  name: string;
+  factor: number;
+}
+
+export type UnitBreakdown = Record<string, number>;
+
+export type ReportQtyFieldKey =
+  | 'preparedQty'
+  | 'independentProductionQty'
+  | 'salesQty'
+  | 'damagedQty'
+  | 'validRemainingQty'
+  | 'invalidRemainingQty';
+
 export interface Product {
   id: string;
   name: string;
   categoryId: string;
   unit: string;
+  units?: ProductUnitOption[];
   isActive: boolean;
   approvalStatus: ProductApprovalStatus;
   allowedDepartments: OperationalDepartmentId[];
@@ -181,6 +197,7 @@ export interface DepartmentReportItem {
   damagedQty?: number | null;
   validRemainingQty?: number | null;
   invalidRemainingQty?: number | null;
+  unitBreakdowns?: Partial<Record<ReportQtyFieldKey, UnitBreakdown>> | null;
   note?: string;
   updatedBy: string;
   updatedByName: string;
@@ -218,6 +235,8 @@ export interface FactoryTransferItem {
   sentQty: number;
   receivedQty?: number | null;
   varianceQty?: number | null;
+  sentBreakdown?: UnitBreakdown | null;
+  receivedBreakdown?: UnitBreakdown | null;
   note?: string;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
@@ -230,6 +249,7 @@ export interface ProductionEntry {
   inventoryDate: string;
   productId: string;
   qty: number;
+  unitBreakdown?: UnitBreakdown | null;
   note?: string;
   createdBy: string;
   createdByName: string;

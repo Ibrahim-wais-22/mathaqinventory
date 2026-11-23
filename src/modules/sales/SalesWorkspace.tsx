@@ -22,8 +22,17 @@ import type {
   DepartmentReportItem,
   Product,
   ProductResult,
+  UnitBreakdown,
 } from '../../types/inventory';
+import { roundQty } from '../../services/inventory/calculator';
+import {
+  decomposeTotalToUnitCounts,
+  formatUnitsSummary,
+  getEffectiveProductUnits,
+  sumUnitCounts,
+} from '../../utils/productUnits';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
+import { MultiUnitQtyInput } from '../../components/common/MultiUnitQtyInput';
 import { StatusBadge } from '../../components/common/StatusBadge';
 
 export const SalesWorkspace: React.FC = () => {
@@ -41,6 +50,7 @@ export const SalesWorkspace: React.FC = () => {
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
   const [salesMap, setSalesMap] = useState<Record<string, string>>({});
+  const [salesCountsMap, setSalesCountsMap] = useState<Record<string, Record<string, string>>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [activeTab, setActiveTab] = useState<'entry' | 'results'>('entry');
@@ -51,6 +61,7 @@ export const SalesWorkspace: React.FC = () => {
 
   const [corrTarget, setCorrTarget] = useState<Product | null>(null);
   const [corrNewVal, setCorrNewVal] = useState('');
+  const [corrCounts, setCorrCounts] = useState<Record<string, string>>({});
   const [corrReason, setCorrReason] = useState('');
 
   const canReadResults = hasPermission('view_results');
@@ -67,10 +78,12 @@ export const SalesWorkspace: React.FC = () => {
   );
 
   const categoryMap = useMemo(() => new Map(categories.map((c) => [c.id, c.name])), [categories]);
+  const productMap = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
 
   useEffect(() => {
     setReport(null);
     setSalesMap({});
+    setSalesCountsMap({});
     if (!account || !currentSession) return;
     let active = true;
     if (!isDeptQtyReadOnly) {
@@ -103,13 +116,23 @@ export const SalesWorkspace: React.FC = () => {
       ),
       (snap) => {
         const next: Record<string, string> = {};
+        const nextCounts: Record<string, Record<string, string>> = {};
         snap.forEach((docSnap) => {
           const item = docSnap.data() as DepartmentReportItem;
           if (item.salesQty !== null && item.salesQty !== undefined) {
             next[item.productId] = String(item.salesQty);
+            const prod = productMap.get(item.productId);
+            if (prod) {
+              nextCounts[item.productId] = decomposeTotalToUnitCounts(
+                item.salesQty,
+                getEffectiveProductUnits(prod),
+                item.unitBreakdowns?.salesQty
+              );
+            }
           }
         });
         setSalesMap(next);
+        setSalesCountsMap(nextCounts);
       },
       (err) => handleFirestoreError(err, OperationType.LIST, `departmentReports/${reportId}/items`)
     );
@@ -146,9 +169,11 @@ export const SalesWorkspace: React.FC = () => {
   const enteredCount = approvedProducts.filter(
     (p) => salesMap[p.id] !== '' && salesMap[p.id] !== undefined
   ).length;
-  const totalSoldUnits = Object.values(salesMap).reduce(
-    (sum, v) => sum + (v !== '' && !Number.isNaN(Number(v)) ? Number(v) : 0),
-    0
+  const totalSoldUnits = roundQty(
+    Object.values(salesMap).reduce(
+      (sum, v) => sum + (v !== '' && !Number.isNaN(Number(v)) ? Number(v) : 0),
+      0
+    )
   );
 
   const resolveActiveReport = async (): Promise<DepartmentReport> => {
@@ -162,23 +187,42 @@ export const SalesWorkspace: React.FC = () => {
     return ensured;
   };
 
+  const buildSalesDraftItems = () => {
+    return approvedProducts.map((p) => {
+      const units = getEffectiveProductUnits(p);
+      const counts = salesCountsMap[p.id];
+      let val: number | null = null;
+      let breakdown: UnitBreakdown | undefined;
+
+      if (counts && Object.keys(counts).length > 0) {
+        const summed = sumUnitCounts(units, counts);
+        if (summed.hasInvalid) {
+          throw new Error(`الكمية المدخلة للصنف "${p.name}" غير صالحة.`);
+        }
+        val = summed.total;
+        breakdown = summed.breakdown;
+      } else {
+        const raw = salesMap[p.id];
+        val = raw === undefined || raw === '' ? null : Number(raw);
+        if (val !== null && (Number.isNaN(val) || val < 0)) {
+          throw new Error(`الكمية المدخلة للصنف "${p.name}" غير صالحة.`);
+        }
+      }
+      return {
+        productId: p.id,
+        categoryId: p.categoryId,
+        salesQty: val !== null ? roundQty(val) : null,
+        unitBreakdowns: breakdown ? { salesQty: breakdown } : null,
+      };
+    });
+  };
+
   const handleSaveDraft = async () => {
     setBusy(true);
     setFeedback(null);
     try {
       const activeReport = await resolveActiveReport();
-      const items = approvedProducts.map((p) => {
-        const raw = salesMap[p.id];
-        const val = raw === undefined || raw === '' ? null : Number(raw);
-        if (val !== null && (Number.isNaN(val) || val < 0)) {
-          throw new Error(`الكمية المدخلة للصنف "${p.name}" غير صالحة.`);
-        }
-        return {
-          productId: p.id,
-          categoryId: p.categoryId,
-          salesQty: val,
-        };
-      });
+      const items = buildSalesDraftItems();
       await saveDepartmentReportDraft(account!, activeReport, items);
       setFeedback({ type: 'success', text: 'تم حفظ مسودة تقرير المبيعات بنجاح.' });
     } catch (err) {
@@ -196,18 +240,7 @@ export const SalesWorkspace: React.FC = () => {
     setFeedback(null);
     try {
       const activeReport = await resolveActiveReport();
-      const items = approvedProducts.map((p) => {
-        const raw = salesMap[p.id];
-        const val = raw === undefined || raw === '' ? null : Number(raw);
-        if (val !== null && (Number.isNaN(val) || val < 0)) {
-          throw new Error(`الكمية المدخلة للصنف "${p.name}" غير صالحة.`);
-        }
-        return {
-          productId: p.id,
-          categoryId: p.categoryId,
-          salesQty: val,
-        };
-      });
+      const items = buildSalesDraftItems();
       await saveDepartmentReportDraft(account!, activeReport, items);
       const count = items.filter((i) => i.salesQty !== null).length;
       await submitDepartmentReport(account!, activeReport, count);
@@ -231,18 +264,19 @@ export const SalesWorkspace: React.FC = () => {
     try {
       const oldV = salesMap[corrTarget.id] ? Number(salesMap[corrTarget.id]) : 0;
       const newV = Number(corrNewVal);
-      if (Number.isNaN(newV) || newV < 0) throw new Error('أدخل عدداً صحيحاً.');
+      if (Number.isNaN(newV) || newV < 0) throw new Error('أدخل كمية صحيحة.');
       await requestReportCorrection(
         account,
         report,
         corrTarget,
         'salesQty',
         oldV,
-        newV,
+        roundQty(newV),
         corrReason
       );
       setCorrTarget(null);
       setCorrNewVal('');
+      setCorrCounts({});
       setCorrReason('');
       setFeedback({ type: 'success', text: 'تم إرسال طلب تصحيح المبيعات إلى الإدارة العليا.' });
     } catch (err) {
@@ -406,42 +440,53 @@ export const SalesWorkspace: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-100">
-                  {filteredProducts.map((prod) => (
+                  {filteredProducts.map((prod) => {
+                    const effectiveUnits = getEffectiveProductUnits(prod);
+                    const totalStr = salesMap[prod.id] ?? '';
+                    const counts =
+                      salesCountsMap[prod.id] ??
+                      (totalStr !== ''
+                        ? decomposeTotalToUnitCounts(Number(totalStr), effectiveUnits)
+                        : {});
+                    return (
                     <tr key={prod.id} className="hover:bg-zinc-50/70">
                       <td className="px-5 py-3 font-semibold text-zinc-900">{prod.name}</td>
                       <td className="px-4 py-3 text-zinc-600">
                         {categoryMap.get(prod.categoryId) || '—'}
                       </td>
-                      <td className="px-4 py-3 text-zinc-600">{prod.unit}</td>
-                      <td className="px-4 py-3">
-                        {isDeptQtyReadOnly ? (
-                          <span className="inline-block min-w-[64px] text-center font-semibold tabular-nums text-zinc-800">
-                            {salesMap[prod.id] !== undefined && salesMap[prod.id] !== ''
-                              ? salesMap[prod.id]
-                              : '—'}
-                          </span>
-                        ) : (
-                          <input
-                            type="number"
-                            min="0"
-                            step="any"
-                            disabled={isSubmitted || isSessionClosed}
-                            value={salesMap[prod.id] ?? ''}
-                            onChange={(e) =>
-                              setSalesMap((prev) => ({ ...prev, [prod.id]: e.target.value }))
-                            }
-                            placeholder="لم يُدخل"
-                            className="w-32 min-h-[40px] rounded-xl border border-zinc-200 px-3 text-center font-semibold tabular-nums focus:outline-none focus:border-[#D91B23] disabled:bg-zinc-100"
-                          />
+                      <td className="px-4 py-3 text-zinc-600">
+                        <div className="font-medium text-zinc-800">{prod.unit}</div>
+                        {effectiveUnits.length > 1 && (
+                          <div className="text-[11px] text-zinc-500">
+                            {formatUnitsSummary(effectiveUnits)}
+                          </div>
                         )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <MultiUnitQtyInput
+                          product={prod}
+                          counts={counts}
+                          totalValue={totalStr}
+                          readOnly={isDeptQtyReadOnly}
+                          disabled={isSubmitted || isSessionClosed}
+                          placeholder="لم يُدخل"
+                          onChange={(nextCounts, nextTotalStr) => {
+                            setSalesCountsMap((prev) => ({ ...prev, [prod.id]: nextCounts }));
+                            setSalesMap((prev) => ({ ...prev, [prod.id]: nextTotalStr }));
+                          }}
+                        />
                       </td>
                       {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                         <td className="px-4 py-3">
                           <button
                             type="button"
                             onClick={() => {
+                              const initVal = salesMap[prod.id] ?? '0';
                               setCorrTarget(prod);
-                              setCorrNewVal(salesMap[prod.id] ?? '0');
+                              setCorrNewVal(initVal);
+                              setCorrCounts(
+                                decomposeTotalToUnitCounts(Number(initVal || 0), effectiveUnits)
+                              );
                             }}
                             className="inline-flex items-center gap-1 text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer"
                           >
@@ -451,7 +496,8 @@ export const SalesWorkspace: React.FC = () => {
                         </td>
                       )}
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -517,13 +563,15 @@ export const SalesWorkspace: React.FC = () => {
             <h3 className="text-lg font-bold text-zinc-900 font-display">
               طلب تصحيح المبيعات — {corrTarget.name}
             </h3>
-            <input
-              type="number"
-              min="0"
-              step="any"
-              value={corrNewVal}
-              onChange={(e) => setCorrNewVal(e.target.value)}
-              className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm tabular-nums"
+            <MultiUnitQtyInput
+              product={corrTarget}
+              counts={corrCounts}
+              totalValue={corrNewVal}
+              fullWidth
+              onChange={(nextCounts, nextTotalStr) => {
+                setCorrCounts(nextCounts);
+                setCorrNewVal(nextTotalStr);
+              }}
             />
             <textarea
               rows={2}

@@ -13,6 +13,7 @@ import type {
   ProductionEntry,
 } from '../../types/inventory';
 import { formatTimestampAden } from '../../utils/dateAden';
+import { roundQty } from '../inventory/calculator';
 
 export type ReportTypeId =
   | 'daily_detailed'
@@ -159,7 +160,7 @@ export function buildReportTable(params: {
           r.productName,
           r.categoryName,
           r.totalAvailable,
-          r.salesQty + r.damagedQty + r.validRemainingQty + r.invalidRemainingQty,
+          roundQty(r.salesQty + r.damagedQty + r.validRemainingQty + r.invalidRemainingQty),
           VARIANCE_LABELS[r.varianceType],
           r.variance,
         ]),
@@ -195,13 +196,13 @@ export function buildReportTable(params: {
           invalidRem: 0,
           netVariance: 0,
         };
-        cur.received += r.factoryReceivedQty;
-        cur.ind += r.independentProductionQty;
-        cur.sales += r.salesQty;
-        cur.damaged += r.damagedQty;
-        cur.validRem += r.validRemainingQty;
-        cur.invalidRem += r.invalidRemainingQty;
-        cur.netVariance += r.variance;
+        cur.received = roundQty(cur.received + r.factoryReceivedQty);
+        cur.ind = roundQty(cur.ind + r.independentProductionQty);
+        cur.sales = roundQty(cur.sales + r.salesQty);
+        cur.damaged = roundQty(cur.damaged + r.damagedQty);
+        cur.validRem = roundQty(cur.validRem + r.validRemainingQty);
+        cur.invalidRem = roundQty(cur.invalidRem + r.invalidRemainingQty);
+        cur.netVariance = roundQty(cur.netVariance + r.variance);
         grouped.set(r.productId, cur);
       }
       return {
@@ -280,7 +281,7 @@ export function buildReportTable(params: {
           unit: r.unit,
           qty: 0,
         };
-        cur.qty += r.salesQty;
+        cur.qty = roundQty(cur.qty + r.salesQty);
         grouped.set(r.productId, cur);
       }
       return {
@@ -302,7 +303,7 @@ export function buildReportTable(params: {
           r.damagedQty,
           r.validRemainingQty,
           r.invalidRemainingQty,
-          r.damagedQty + r.invalidRemainingQty,
+          roundQty(r.damagedQty + r.invalidRemainingQty),
         ]),
       };
 
@@ -330,7 +331,7 @@ export function buildReportTable(params: {
             totalDeficit: 0,
           };
           cur.occurrences += 1;
-          cur.totalDeficit += r.variance;
+          cur.totalDeficit = roundQty(cur.totalDeficit + r.variance);
           counts.set(r.productId, cur);
         }
       }
@@ -365,12 +366,12 @@ export function buildReportTable(params: {
           invalidRem: 0,
           netVariance: 0,
         };
-        cur.available += r.totalAvailable;
-        cur.sales += r.salesQty;
-        cur.damaged += r.damagedQty;
-        cur.validRem += r.validRemainingQty;
-        cur.invalidRem += r.invalidRemainingQty;
-        cur.netVariance += r.variance;
+        cur.available = roundQty(cur.available + r.totalAvailable);
+        cur.sales = roundQty(cur.sales + r.salesQty);
+        cur.damaged = roundQty(cur.damaged + r.damagedQty);
+        cur.validRem = roundQty(cur.validRem + r.validRemainingQty);
+        cur.invalidRem = roundQty(cur.invalidRem + r.invalidRemainingQty);
+        cur.netVariance = roundQty(cur.netVariance + r.variance);
         byDay.set(r.inventoryDate, cur);
       }
       return {

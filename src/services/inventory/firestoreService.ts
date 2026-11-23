@@ -28,7 +28,10 @@ import type {
   PermissionKey,
   Product,
   ProductResult,
+  ProductUnitOption,
   ProductionEntry,
+  ReportQtyFieldKey,
+  UnitBreakdown,
   UserAccount,
   UserInvite,
   UserRole,
@@ -39,6 +42,12 @@ import {
   normalizePhoneForPassword,
   verifyPassword,
 } from '../../utils/passwordCrypto';
+import {
+  buildNormalizedProductUnits,
+  formatBreakdownText,
+  formatUnitsSummary,
+  sanitizeUnitBreakdown,
+} from '../../utils/productUnits';
 import { OperationType, db, handleFirestoreError } from '../firebase/config';
 import { calculateProductInventory, roundQty, safeNum, sanitizeId } from './calculator';
 
@@ -444,6 +453,7 @@ export async function proposeProductByFactory(
     name: string;
     categoryId: string;
     unit: string;
+    units?: ProductUnitOption[];
     allowedDepartments: OperationalDepartmentId[];
     reason?: string;
   }
@@ -451,11 +461,14 @@ export async function proposeProductByFactory(
   const productId = makeUniqueId('prod');
   const approvalId = makeUniqueId('app');
   const batch = writeBatch(db);
+  const cleanUnit = input.unit.trim().slice(0, 40) || 'وحدة';
+  const normalizedUnits = buildNormalizedProductUnits(cleanUnit, input.units);
 
   batch.set(doc(db, 'products', productId), {
     name: input.name.trim().slice(0, 140),
     categoryId: input.categoryId,
-    unit: input.unit.trim().slice(0, 40),
+    unit: cleanUnit,
+    units: normalizedUnits,
     isActive: false,
     approvalStatus: 'pending_technical',
     allowedDepartments: input.allowedDepartments.length
@@ -489,7 +502,7 @@ export async function proposeProductByFactory(
       targetCollection: 'products',
       targetId: productId,
       department: actor.department,
-      newValueSummary: `${input.name} (${input.unit})`,
+      newValueSummary: `${input.name} (${formatUnitsSummary(normalizedUnits)})`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `products/${productId}`);
@@ -502,15 +515,19 @@ export async function createProductByAdmin(
     name: string;
     categoryId: string;
     unit: string;
+    units?: ProductUnitOption[];
     allowedDepartments: OperationalDepartmentId[];
   }
 ): Promise<void> {
   const productId = makeUniqueId('prod');
+  const cleanUnit = input.unit.trim().slice(0, 40) || 'وحدة';
+  const normalizedUnits = buildNormalizedProductUnits(cleanUnit, input.units);
   try {
     await setDoc(doc(db, 'products', productId), {
       name: input.name.trim().slice(0, 140),
       categoryId: input.categoryId,
-      unit: input.unit.trim().slice(0, 40),
+      unit: cleanUnit,
+      units: normalizedUnits,
       isActive: true,
       approvalStatus: 'approved',
       allowedDepartments: input.allowedDepartments,
@@ -528,7 +545,7 @@ export async function createProductByAdmin(
       action: 'إنشاء_واعتماد_صنف_مباشر',
       targetCollection: 'products',
       targetId: productId,
-      newValueSummary: `${input.name} (${input.unit})`,
+      newValueSummary: `${input.name} (${formatUnitsSummary(normalizedUnits)})`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `products/${productId}`);
@@ -542,6 +559,7 @@ export async function updateProductByAdmin(
     name: string;
     categoryId: string;
     unit: string;
+    units?: ProductUnitOption[];
     isActive: boolean;
     allowedDepartments: OperationalDepartmentId[];
   }
@@ -561,11 +579,17 @@ export async function updateProductByAdmin(
     throw new Error('اختر إدارة واحدة على الأقل.');
   }
 
+  const normalizedUnits = buildNormalizedProductUnits(
+    cleanUnit,
+    updates.units ?? product.units
+  );
+
   try {
     await updateDoc(doc(db, 'products', product.id), {
       name: cleanName,
       categoryId: updates.categoryId,
       unit: cleanUnit,
+      units: normalizedUnits,
       isActive: updates.isActive,
       approvalStatus: updates.isActive ? 'approved' : 'inactive',
       allowedDepartments: updates.allowedDepartments,
@@ -618,7 +642,7 @@ export async function updateProductByAdmin(
       targetCollection: 'products',
       targetId: product.id,
       oldValueSummary: `${product.name} · ${product.unit} · ${product.isActive ? 'نشط' : 'موقوف'}`,
-      newValueSummary: `${cleanName} · ${cleanUnit} · ${updates.isActive ? 'نشط' : 'موقوف'}`,
+      newValueSummary: `${cleanName} · ${formatUnitsSummary(normalizedUnits)} · ${updates.isActive ? 'نشط' : 'موقوف'}`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `products/${product.id}`);
@@ -867,6 +891,7 @@ export async function saveDepartmentReportDraft(
     damagedQty?: number | null;
     validRemainingQty?: number | null;
     invalidRemainingQty?: number | null;
+    unitBreakdowns?: Partial<Record<ReportQtyFieldKey, UnitBreakdown>> | null;
     note?: string;
   }>
 ): Promise<void> {
@@ -906,6 +931,24 @@ export async function saveDepartmentReportDraft(
         continue;
       }
 
+      const cleanBreakdowns: Partial<Record<ReportQtyFieldKey, UnitBreakdown>> = {};
+      if (item.unitBreakdowns && typeof item.unitBreakdowns === 'object') {
+        const keys: ReportQtyFieldKey[] = [
+          'preparedQty',
+          'independentProductionQty',
+          'salesQty',
+          'damagedQty',
+          'validRemainingQty',
+          'invalidRemainingQty',
+        ];
+        for (const k of keys) {
+          const cleaned = sanitizeUnitBreakdown(item.unitBreakdowns[k]);
+          if (cleaned) {
+            cleanBreakdowns[k] = cleaned;
+          }
+        }
+      }
+
       const itemRef = doc(db, 'departmentReports', report.id, 'items', item.productId);
       const payload: Record<string, unknown> = {
         reportId: report.id,
@@ -921,6 +964,7 @@ export async function saveDepartmentReportDraft(
         damagedQty: item.damagedQty ?? null,
         validRemainingQty: item.validRemainingQty ?? null,
         invalidRemainingQty: item.invalidRemainingQty ?? null,
+        unitBreakdowns: Object.keys(cleanBreakdowns).length > 0 ? cleanBreakdowns : null,
         note: (item.note || '').slice(0, 300),
         updatedBy: actor.uid,
         updatedByName: actorName,
@@ -990,7 +1034,7 @@ export async function submitDepartmentReport(
 export async function createFactoryTransfer(
   actor: UserAccount,
   session: DailySession,
-  items: Array<{ product: Product; sentQty: number; note?: string }>,
+  items: Array<{ product: Product; sentQty: number; sentBreakdown?: UnitBreakdown; note?: string }>,
   factoryNote: string
 ): Promise<void> {
   for (const i of items) {
@@ -1026,6 +1070,7 @@ export async function createFactoryTransfer(
   });
 
   for (const item of validItems) {
+    const cleanSentBreakdown = sanitizeUnitBreakdown(item.sentBreakdown);
     batch.set(doc(db, 'factoryTransfers', transferId, 'items', item.product.id), {
       transferId,
       sessionId: session.id,
@@ -1033,7 +1078,9 @@ export async function createFactoryTransfer(
       productName: item.product.name.slice(0, 140),
       unit: item.product.unit.slice(0, 40),
       sentQty: safeNum(item.sentQty),
+      sentBreakdown: cleanSentBreakdown ?? null,
       receivedQty: null,
+      receivedBreakdown: null,
       varianceQty: null,
       note: (item.note || '').slice(0, 300),
       createdAt: serverTimestamp(),
@@ -1062,7 +1109,12 @@ export async function createFactoryTransfer(
 export async function confirmTransferReceipt(
   actor: UserAccount,
   transfer: FactoryTransfer,
-  receivedItems: Array<{ item: FactoryTransferItem; receivedQty: number; note?: string }>,
+  receivedItems: Array<{
+    item: FactoryTransferItem;
+    receivedQty: number;
+    receivedBreakdown?: UnitBreakdown;
+    note?: string;
+  }>,
   productionNote: string
 ): Promise<void> {
   if (transfer.status !== 'pending_receipt') {
@@ -1081,9 +1133,11 @@ export async function confirmTransferReceipt(
     if (variance !== 0) hasDiscrepancy = true;
     totalReceivedQty += rec;
     totalVarianceQty += variance;
+    const cleanRecBreakdown = sanitizeUnitBreakdown(row.receivedBreakdown);
 
     batch.update(doc(db, 'factoryTransfers', transfer.id, 'items', row.item.productId), {
       receivedQty: rec,
+      receivedBreakdown: cleanRecBreakdown ?? null,
       varianceQty: variance,
       note: (row.note || row.item.note || '').slice(0, 300),
       updatedAt: serverTimestamp(),
@@ -1127,13 +1181,16 @@ export async function addIndependentProduction(
   session: DailySession,
   product: Product,
   qty: number,
-  note: string
+  note: string,
+  unitBreakdown?: UnitBreakdown
 ): Promise<void> {
   if (qty <= 0) {
     throw new Error('يجب أن تكون كمية الإنتاج المستقل أكبر من صفر.');
   }
   const entryId = makeUniqueId('ind');
   const actorName = (actor.fullName || actor.username || 'موظف الإنتاج').trim().slice(0, 120);
+  const cleanBreakdown = sanitizeUnitBreakdown(unitBreakdown);
+  const breakdownText = cleanBreakdown ? formatBreakdownText(cleanBreakdown, product.units) : '';
   try {
     await setDoc(doc(db, 'productionEntries', entryId), {
       sessionId: session.id,
@@ -1141,6 +1198,7 @@ export async function addIndependentProduction(
       inventoryDate: session.inventoryDate,
       productId: product.id,
       qty: safeNum(qty),
+      unitBreakdown: cleanBreakdown ?? null,
       note: note.trim().slice(0, 300),
       createdBy: actor.uid,
       createdByName: actorName,
@@ -1157,7 +1215,9 @@ export async function addIndependentProduction(
       inventoryDate: session.inventoryDate,
       branchId: session.branchId,
       department: 'production',
-      newValueSummary: `${product.name}: ${safeNum(qty)} ${product.unit}`,
+      newValueSummary: breakdownText
+        ? `${product.name}: ${safeNum(qty)} ${product.unit} (${breakdownText})`
+        : `${product.name}: ${safeNum(qty)} ${product.unit}`,
       reason: note,
     });
   } catch (error) {

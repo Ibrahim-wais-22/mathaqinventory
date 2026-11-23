@@ -21,8 +21,17 @@ import type {
   DepartmentReport,
   DepartmentReportItem,
   Product,
+  UnitBreakdown,
 } from '../../types/inventory';
+import { roundQty } from '../../services/inventory/calculator';
+import {
+  decomposeTotalToUnitCounts,
+  formatUnitsSummary,
+  getEffectiveProductUnits,
+  sumUnitCounts,
+} from '../../utils/productUnits';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
+import { MultiUnitQtyInput } from '../../components/common/MultiUnitQtyInput';
 import { StatusBadge } from '../../components/common/StatusBadge';
 
 interface WasteDraftRow {
@@ -30,6 +39,9 @@ interface WasteDraftRow {
   validRemainingQty: string;
   invalidRemainingQty: string;
 }
+
+type WasteFieldKey = keyof WasteDraftRow;
+type WasteCountsRow = Partial<Record<WasteFieldKey, Record<string, string>>>;
 
 export const WasteWorkspace: React.FC = () => {
   const {
@@ -45,6 +57,7 @@ export const WasteWorkspace: React.FC = () => {
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
   const [wasteMap, setWasteMap] = useState<Record<string, WasteDraftRow>>({});
+  const [wasteCountsMap, setWasteCountsMap] = useState<Record<string, WasteCountsRow>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [busy, setBusy] = useState(false);
@@ -52,10 +65,9 @@ export const WasteWorkspace: React.FC = () => {
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const [corrTarget, setCorrTarget] = useState<Product | null>(null);
-  const [corrField, setCorrField] = useState<
-    'damagedQty' | 'validRemainingQty' | 'invalidRemainingQty'
-  >('validRemainingQty');
+  const [corrField, setCorrField] = useState<WasteFieldKey>('validRemainingQty');
   const [corrNewVal, setCorrNewVal] = useState('');
+  const [corrCounts, setCorrCounts] = useState<Record<string, string>>({});
   const [corrReason, setCorrReason] = useState('');
 
   const isSessionClosed = currentSession?.status === 'closed';
@@ -71,10 +83,12 @@ export const WasteWorkspace: React.FC = () => {
   );
 
   const categoryMap = useMemo(() => new Map(categories.map((c) => [c.id, c.name])), [categories]);
+  const productMap = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
 
   useEffect(() => {
     setReport(null);
     setWasteMap({});
+    setWasteCountsMap({});
     if (!account || !currentSession) return;
     let active = true;
     if (!isDeptQtyReadOnly) {
@@ -107,6 +121,7 @@ export const WasteWorkspace: React.FC = () => {
       ),
       (snap) => {
         const next: Record<string, WasteDraftRow> = {};
+        const nextCounts: Record<string, WasteCountsRow> = {};
         snap.forEach((docSnap) => {
           const item = docSnap.data() as DepartmentReportItem;
           next[item.productId] = {
@@ -123,8 +138,30 @@ export const WasteWorkspace: React.FC = () => {
                 ? String(item.invalidRemainingQty)
                 : '',
           };
+          const prod = productMap.get(item.productId);
+          if (prod) {
+            const units = getEffectiveProductUnits(prod);
+            nextCounts[item.productId] = {
+              damagedQty: decomposeTotalToUnitCounts(
+                item.damagedQty,
+                units,
+                item.unitBreakdowns?.damagedQty
+              ),
+              validRemainingQty: decomposeTotalToUnitCounts(
+                item.validRemainingQty,
+                units,
+                item.unitBreakdowns?.validRemainingQty
+              ),
+              invalidRemainingQty: decomposeTotalToUnitCounts(
+                item.invalidRemainingQty,
+                units,
+                item.unitBreakdowns?.invalidRemainingQty
+              ),
+            };
+          }
         });
         setWasteMap(next);
+        setWasteCountsMap(nextCounts);
       },
       (err) => handleFirestoreError(err, OperationType.LIST, `departmentReports/${reportId}/items`)
     );
@@ -144,7 +181,12 @@ export const WasteWorkspace: React.FC = () => {
     });
   }, [approvedProducts, selectedCategory, searchQuery]);
 
-  const setField = (productId: string, key: keyof WasteDraftRow, val: string) => {
+  const setFieldWithCounts = (
+    productId: string,
+    key: WasteFieldKey,
+    val: string,
+    counts: Record<string, string>
+  ) => {
     setWasteMap((prev) => ({
       ...prev,
       [productId]: {
@@ -152,6 +194,13 @@ export const WasteWorkspace: React.FC = () => {
         validRemainingQty: prev[productId]?.validRemainingQty ?? '',
         invalidRemainingQty: prev[productId]?.invalidRemainingQty ?? '',
         [key]: val,
+      },
+    }));
+    setWasteCountsMap((prev) => ({
+      ...prev,
+      [productId]: {
+        ...(prev[productId] || {}),
+        [key]: counts,
       },
     }));
   };
@@ -166,20 +215,45 @@ export const WasteWorkspace: React.FC = () => {
   const parseItemsForSave = () => {
     return approvedProducts.map((p) => {
       const row = wasteMap[p.id];
-      const parseVal = (raw?: string) => {
-        if (raw === undefined || raw === '') return null;
+      const countsRow = wasteCountsMap[p.id];
+      const units = getEffectiveProductUnits(p);
+
+      const resolveField = (key: WasteFieldKey) => {
+        const counts = countsRow?.[key];
+        if (counts && Object.keys(counts).length > 0) {
+          const summed = sumUnitCounts(units, counts);
+          if (summed.hasInvalid) {
+            throw new Error(`القيمة المدخلة للصنف "${p.name}" يجب أن تكون رقماً غير سالب.`);
+          }
+          return {
+            val: summed.total !== null ? roundQty(summed.total) : null,
+            breakdown: summed.breakdown,
+          };
+        }
+        const raw = row?.[key];
+        if (raw === undefined || raw === '') return { val: null, breakdown: undefined };
         const num = Number(raw);
         if (Number.isNaN(num) || num < 0) {
           throw new Error(`القيمة المدخلة للصنف "${p.name}" يجب أن تكون رقماً غير سالب.`);
         }
-        return num;
+        return { val: roundQty(num), breakdown: undefined };
       };
+
+      const damaged = resolveField('damagedQty');
+      const validRem = resolveField('validRemainingQty');
+      const invalidRem = resolveField('invalidRemainingQty');
+      const unitBreakdowns: Partial<Record<WasteFieldKey, UnitBreakdown>> = {};
+      if (damaged.breakdown) unitBreakdowns.damagedQty = damaged.breakdown;
+      if (validRem.breakdown) unitBreakdowns.validRemainingQty = validRem.breakdown;
+      if (invalidRem.breakdown) unitBreakdowns.invalidRemainingQty = invalidRem.breakdown;
+
       return {
         productId: p.id,
         categoryId: p.categoryId,
-        damagedQty: parseVal(row?.damagedQty),
-        validRemainingQty: parseVal(row?.validRemainingQty),
-        invalidRemainingQty: parseVal(row?.invalidRemainingQty),
+        damagedQty: damaged.val,
+        validRemainingQty: validRem.val,
+        invalidRemainingQty: invalidRem.val,
+        unitBreakdowns: Object.keys(unitBreakdowns).length > 0 ? unitBreakdowns : null,
       };
     });
   };
@@ -249,9 +323,18 @@ export const WasteWorkspace: React.FC = () => {
       const oldV = curRow?.[corrField] ? Number(curRow[corrField]) : 0;
       const newV = Number(corrNewVal);
       if (Number.isNaN(newV) || newV < 0) throw new Error('أدخل كمية صحيحة.');
-      await requestReportCorrection(account, report, corrTarget, corrField, oldV, newV, corrReason);
+      await requestReportCorrection(
+        account,
+        report,
+        corrTarget,
+        corrField,
+        oldV,
+        roundQty(newV),
+        corrReason
+      );
       setCorrTarget(null);
       setCorrNewVal('');
+      setCorrCounts({});
       setCorrReason('');
       setFeedback({ type: 'success', text: 'تم إرسال طلب التصحيح إلى الإدارة العليا.' });
     } catch (err) {
@@ -408,82 +491,86 @@ export const WasteWorkspace: React.FC = () => {
             </thead>
             <tbody className="divide-y divide-zinc-100">
               {filteredProducts.map((prod) => {
+                const effectiveUnits = getEffectiveProductUnits(prod);
                 const row = wasteMap[prod.id] || {
                   damagedQty: '',
                   validRemainingQty: '',
                   invalidRemainingQty: '',
                 };
+                const countsRow = wasteCountsMap[prod.id];
+                const getCountsFor = (key: WasteFieldKey) =>
+                  countsRow?.[key] ??
+                  (row[key] !== ''
+                    ? decomposeTotalToUnitCounts(Number(row[key]), effectiveUnits)
+                    : {});
                 return (
                   <tr key={prod.id} className="hover:bg-zinc-50/70">
                     <td className="px-5 py-3">
                       <div className="font-semibold text-zinc-900">{prod.name}</div>
-                      <div className="text-xs text-zinc-400">{prod.unit}</div>
+                      <div className="text-xs text-zinc-400">
+                        {effectiveUnits.length > 1
+                          ? formatUnitsSummary(effectiveUnits)
+                          : prod.unit}
+                      </div>
                     </td>
                     <td className="px-3 py-3 text-zinc-600">
                       {categoryMap.get(prod.categoryId) || '—'}
                     </td>
                     <td className="px-3 py-3">
-                      {isDeptQtyReadOnly ? (
-                        <span className="inline-block min-w-[48px] text-center font-semibold tabular-nums text-zinc-800">
-                          {row.damagedQty !== '' ? row.damagedQty : '—'}
-                        </span>
-                      ) : (
-                        <input
-                          type="number"
-                          min="0"
-                          step="any"
-                          disabled={isSubmitted || isSessionClosed}
-                          value={row.damagedQty}
-                          onChange={(e) => setField(prod.id, 'damagedQty', e.target.value)}
-                          placeholder="0"
-                          className="w-24 min-h-[40px] rounded-xl border border-zinc-200 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
-                        />
-                      )}
+                      <MultiUnitQtyInput
+                        product={prod}
+                        counts={getCountsFor('damagedQty')}
+                        totalValue={row.damagedQty}
+                        readOnly={isDeptQtyReadOnly}
+                        disabled={isSubmitted || isSessionClosed}
+                        compact
+                        placeholder="0"
+                        onChange={(nextCounts, nextTotalStr) =>
+                          setFieldWithCounts(prod.id, 'damagedQty', nextTotalStr, nextCounts)
+                        }
+                      />
                     </td>
                     <td className="px-3 py-3">
-                      {isDeptQtyReadOnly ? (
-                        <span className="inline-block min-w-[48px] text-center font-semibold tabular-nums text-emerald-700">
-                          {row.validRemainingQty !== '' ? row.validRemainingQty : '—'}
-                        </span>
-                      ) : (
-                        <input
-                          type="number"
-                          min="0"
-                          step="any"
-                          disabled={isSubmitted || isSessionClosed}
-                          value={row.validRemainingQty}
-                          onChange={(e) => setField(prod.id, 'validRemainingQty', e.target.value)}
-                          placeholder="0"
-                          className="w-24 min-h-[40px] rounded-xl border border-emerald-200 bg-emerald-50/30 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
-                        />
-                      )}
+                      <MultiUnitQtyInput
+                        product={prod}
+                        counts={getCountsFor('validRemainingQty')}
+                        totalValue={row.validRemainingQty}
+                        readOnly={isDeptQtyReadOnly}
+                        disabled={isSubmitted || isSessionClosed}
+                        compact
+                        tone="emerald"
+                        placeholder="0"
+                        onChange={(nextCounts, nextTotalStr) =>
+                          setFieldWithCounts(prod.id, 'validRemainingQty', nextTotalStr, nextCounts)
+                        }
+                      />
                     </td>
                     <td className="px-3 py-3">
-                      {isDeptQtyReadOnly ? (
-                        <span className="inline-block min-w-[48px] text-center font-semibold tabular-nums text-zinc-800">
-                          {row.invalidRemainingQty !== '' ? row.invalidRemainingQty : '—'}
-                        </span>
-                      ) : (
-                        <input
-                          type="number"
-                          min="0"
-                          step="any"
-                          disabled={isSubmitted || isSessionClosed}
-                          value={row.invalidRemainingQty}
-                          onChange={(e) => setField(prod.id, 'invalidRemainingQty', e.target.value)}
-                          placeholder="0"
-                          className="w-24 min-h-[40px] rounded-xl border border-zinc-200 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
-                        />
-                      )}
+                      <MultiUnitQtyInput
+                        product={prod}
+                        counts={getCountsFor('invalidRemainingQty')}
+                        totalValue={row.invalidRemainingQty}
+                        readOnly={isDeptQtyReadOnly}
+                        disabled={isSubmitted || isSessionClosed}
+                        compact
+                        placeholder="0"
+                        onChange={(nextCounts, nextTotalStr) =>
+                          setFieldWithCounts(prod.id, 'invalidRemainingQty', nextTotalStr, nextCounts)
+                        }
+                      />
                     </td>
                     {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                       <td className="px-4 py-3">
                         <button
                           type="button"
                           onClick={() => {
+                            const initVal = row.validRemainingQty || '0';
                             setCorrTarget(prod);
                             setCorrField('validRemainingQty');
-                            setCorrNewVal(row.validRemainingQty || '0');
+                            setCorrNewVal(initVal);
+                            setCorrCounts(
+                              decomposeTotalToUnitCounts(Number(initVal || 0), effectiveUnits)
+                            );
                           }}
                           className="inline-flex items-center gap-1 text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer"
                         >
@@ -519,24 +606,33 @@ export const WasteWorkspace: React.FC = () => {
             </h3>
             <select
               value={corrField}
-              onChange={(e) =>
-                setCorrField(
-                  e.target.value as 'damagedQty' | 'validRemainingQty' | 'invalidRemainingQty'
-                )
-              }
+              onChange={(e) => {
+                const nextField = e.target.value as WasteFieldKey;
+                const initVal = wasteMap[corrTarget.id]?.[nextField] || '0';
+                setCorrField(nextField);
+                setCorrNewVal(initVal);
+                setCorrCounts(
+                  decomposeTotalToUnitCounts(
+                    Number(initVal || 0),
+                    getEffectiveProductUnits(corrTarget)
+                  )
+                );
+              }}
               className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
             >
               <option value="damagedQty">التالف</option>
               <option value="validRemainingQty">المتبقي الصالح</option>
               <option value="invalidRemainingQty">المتبقي غير الصالح</option>
             </select>
-            <input
-              type="number"
-              min="0"
-              step="any"
-              value={corrNewVal}
-              onChange={(e) => setCorrNewVal(e.target.value)}
-              className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm tabular-nums"
+            <MultiUnitQtyInput
+              product={corrTarget}
+              counts={corrCounts}
+              totalValue={corrNewVal}
+              fullWidth
+              onChange={(nextCounts, nextTotalStr) => {
+                setCorrCounts(nextCounts);
+                setCorrNewVal(nextTotalStr);
+              }}
             />
             <textarea
               rows={2}

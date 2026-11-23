@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Edit3, FolderPlus, PackagePlus, X, XCircle } from 'lucide-react';
+import { CheckCircle2, Edit3, FolderPlus, PackagePlus, Plus, Trash2, X, XCircle } from 'lucide-react';
 import {
   DEPARTMENT_LABELS,
   OPERATIONAL_DEPARTMENTS,
@@ -14,8 +14,47 @@ import {
   updateCategory,
   updateProductByAdmin,
 } from '../../services/inventory/firestoreService';
-import type { Category, OperationalDepartmentId, Product } from '../../types/inventory';
+import type {
+  Category,
+  OperationalDepartmentId,
+  Product,
+  ProductUnitOption,
+} from '../../types/inventory';
+import {
+  buildHalvesAndQuartersPreset,
+  buildNormalizedProductUnits,
+  formatUnitsSummary,
+  getEffectiveProductUnits,
+} from '../../utils/productUnits';
 import { StatusBadge } from '../../components/common/StatusBadge';
+
+interface SubUnitDraft {
+  name: string;
+  factor: string;
+}
+
+function toSubUnitDrafts(units: ProductUnitOption[]): SubUnitDraft[] {
+  return units
+    .slice(1)
+    .map((u) => ({ name: u.name, factor: String(u.factor) }));
+}
+
+function parseSubUnitDrafts(baseUnit: string, drafts: SubUnitDraft[]): ProductUnitOption[] {
+  const candidates: ProductUnitOption[] = [];
+  for (const row of drafts) {
+    const name = row.name.trim();
+    const factor = Number(row.factor);
+    if (!name && !row.factor.trim()) continue;
+    if (!name) {
+      throw new Error('يرجى إدخال اسم كل وحدة فرعية أو حذف السطر الفارغ.');
+    }
+    if (!Number.isFinite(factor) || factor <= 0 || factor > 10000) {
+      throw new Error(`معامل التحويل للوحدة "${name}" يجب أن يكون أكبر من صفر (مثال: 0.5 أو 0.25).`);
+    }
+    candidates.push({ name, factor });
+  }
+  return buildNormalizedProductUnits(baseUnit, candidates);
+}
 
 export const CatalogManagement: React.FC = () => {
   const { account, categories, products } = useFirebase();
@@ -31,6 +70,10 @@ export const CatalogManagement: React.FC = () => {
   const [prodName, setProdName] = useState('');
   const [prodCatId, setProdCatId] = useState('');
   const [prodUnit, setProdUnit] = useState('نفر');
+  const [prodSubUnits, setProdSubUnits] = useState<SubUnitDraft[]>([
+    { name: 'نص نفر', factor: '0.5' },
+    { name: 'ربع نفر', factor: '0.25' },
+  ]);
   const [prodDepts, setProdDepts] = useState<OperationalDepartmentId[]>([
     'factory',
     'production',
@@ -43,6 +86,7 @@ export const CatalogManagement: React.FC = () => {
   const [editProdName, setEditProdName] = useState('');
   const [editProdCatId, setEditProdCatId] = useState('');
   const [editProdUnit, setEditProdUnit] = useState('');
+  const [editProdSubUnits, setEditProdSubUnits] = useState<SubUnitDraft[]>([]);
   const [editProdIsActive, setEditProdIsActive] = useState(true);
   const [editProdDepts, setEditProdDepts] = useState<OperationalDepartmentId[]>([]);
   const [editModalError, setEditModalError] = useState<string | null>(null);
@@ -101,10 +145,12 @@ export const CatalogManagement: React.FC = () => {
   };
 
   const openEditProductModal = (prod: Product) => {
+    const effectiveUnits = getEffectiveProductUnits(prod);
     setEditingProd(prod);
     setEditProdName(prod.name);
     setEditProdCatId(prod.categoryId || categories[0]?.id || '');
     setEditProdUnit(prod.unit || 'نفر');
+    setEditProdSubUnits(toSubUnitDrafts(effectiveUnits));
     setEditProdIsActive(prod.isActive);
     setEditProdDepts(
       prod.allowedDepartments && prod.allowedDepartments.length > 0
@@ -112,6 +158,20 @@ export const CatalogManagement: React.FC = () => {
         : ['factory', 'production', 'sales', 'waste']
     );
     setEditModalError(null);
+  };
+
+  const applyPresetToAdd = (presetBase?: string) => {
+    const base = presetBase || prodUnit.trim() || 'حبة';
+    if (presetBase) setProdUnit(presetBase);
+    const preset = buildHalvesAndQuartersPreset(base);
+    setProdSubUnits(toSubUnitDrafts(preset));
+  };
+
+  const applyPresetToEdit = (presetBase?: string) => {
+    const base = presetBase || editProdUnit.trim() || 'حبة';
+    if (presetBase) setEditProdUnit(presetBase);
+    const preset = buildHalvesAndQuartersPreset(base);
+    setEditProdSubUnits(toSubUnitDrafts(preset));
   };
 
   const handleSaveCategory = async (e: React.FormEvent) => {
@@ -214,11 +274,13 @@ export const CatalogManagement: React.FC = () => {
       const targetCat = prodCatId || categories[0]?.id;
       if (!targetCat) throw new Error('أضف مجموعة أصناف أولاً.');
       if (prodDepts.length === 0) throw new Error('اختر إدارة واحدة على الأقل.');
+      const normalizedUnits = parseSubUnitDrafts(trimmedUnit, prodSubUnits);
 
       await createProductByAdmin(account, {
         name: trimmedName,
         categoryId: targetCat,
         unit: trimmedUnit,
+        units: normalizedUnits,
         allowedDepartments: prodDepts,
       });
       setFeedback({ type: 'success', text: `تم إنشاء الصنف "${trimmedName}" واعتماده مباشرة.` });
@@ -268,10 +330,12 @@ export const CatalogManagement: React.FC = () => {
     setEditModalError(null);
     setFeedback(null);
     try {
+      const normalizedUnits = parseSubUnitDrafts(trimmedUnit, editProdSubUnits);
       await updateProductByAdmin(account, editingProd, {
         name: trimmedName,
         categoryId: targetCat,
         unit: trimmedUnit,
+        units: normalizedUnits,
         isActive: editProdIsActive,
         allowedDepartments: editProdDepts,
       });
@@ -556,7 +620,15 @@ export const CatalogManagement: React.FC = () => {
                 <label className="block text-xs font-semibold text-zinc-700 mb-1">المجموعة</label>
                 <select
                   value={prodCatId || categories[0]?.id || ''}
-                  onChange={(e) => setProdCatId(e.target.value)}
+                  onChange={(e) => {
+                    const nextCat = e.target.value;
+                    setProdCatId(nextCat);
+                    if (nextCat === 'cat_chicken') {
+                      applyPresetToAdd('حبة');
+                    } else if (nextCat === 'cat_meats') {
+                      applyPresetToAdd('نفر');
+                    }
+                  }}
                   className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm bg-white"
                 >
                   {categories.map((c) => (
@@ -568,7 +640,7 @@ export const CatalogManagement: React.FC = () => {
               </div>
               <div>
                 <label className="block text-xs font-semibold text-zinc-700 mb-1">
-                  وحدة القياس
+                  الوحدة الأساسية (1)
                 </label>
                 <input
                   type="text"
@@ -578,6 +650,102 @@ export const CatalogManagement: React.FC = () => {
                   className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
                 />
               </div>
+            </div>
+
+            {/* Sub-units Builder */}
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-bold text-zinc-800">
+                    الوحدات الفرعية والأجزاء (اختياري)
+                  </div>
+                  <div className="text-[11px] text-zinc-500">
+                    مثال: للحبة الدجاج ← نص (0.5) وربع (0.25)، أو للنفر ← نص نفر وربع نفر
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => applyPresetToAdd()}
+                    className="min-h-[30px] px-2.5 rounded-lg border border-zinc-200 bg-white text-[11px] font-semibold text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+                  >
+                    إضافة نص وربع
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyPresetToAdd('حبة')}
+                    className="min-h-[30px] px-2.5 rounded-lg border border-zinc-200 bg-white text-[11px] font-semibold text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+                  >
+                    حبة · نص · ربع
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setProdSubUnits((prev) =>
+                        prev.length < 9 ? [...prev, { name: '', factor: '0.5' }] : prev
+                      )
+                    }
+                    className="min-h-[30px] inline-flex items-center gap-1 px-2.5 rounded-lg bg-[#18181B] text-[11px] font-semibold text-white cursor-pointer"
+                  >
+                    <Plus className="h-3 w-3" />
+                    <span>وحدة فرعية</span>
+                  </button>
+                </div>
+              </div>
+
+              {prodSubUnits.length === 0 ? (
+                <div className="text-[11px] text-zinc-400">
+                  يستخدم هذا الصنف الوحدة الأساسية فقط ({prodUnit || 'وحدة'}).
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {prodSubUnits.map((sub, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white p-2"
+                    >
+                      <input
+                        type="text"
+                        value={sub.name}
+                        onChange={(e) =>
+                          setProdSubUnits((prev) =>
+                            prev.map((row, i) => (i === idx ? { ...row, name: e.target.value } : row))
+                          )
+                        }
+                        placeholder="اسم الوحدة (مثال: نص)"
+                        className="flex-1 min-w-0 min-h-[34px] rounded-md border border-zinc-200 px-2 text-xs"
+                      />
+                      <input
+                        type="number"
+                        min="0.001"
+                        max="10000"
+                        step="any"
+                        value={sub.factor}
+                        onChange={(e) =>
+                          setProdSubUnits((prev) =>
+                            prev.map((row, i) =>
+                              i === idx ? { ...row, factor: e.target.value } : row
+                            )
+                          )
+                        }
+                        placeholder="0.5"
+                        title="المعامل من الوحدة الأساسية"
+                        className="w-20 min-h-[34px] rounded-md border border-zinc-200 px-2 text-center text-xs tabular-nums"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setProdSubUnits((prev) => prev.filter((_, i) => i !== idx))
+                        }
+                        aria-label="حذف الوحدة الفرعية"
+                        className="h-8 w-8 inline-flex items-center justify-center rounded-md text-zinc-400 hover:text-red-600 hover:bg-red-50 cursor-pointer shrink-0"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div>
@@ -635,7 +803,9 @@ export const CatalogManagement: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-100">
-                  {products.map((prod) => (
+                  {products.map((prod) => {
+                    const effectiveUnits = getEffectiveProductUnits(prod);
+                    return (
                     <tr key={prod.id} className="hover:bg-zinc-50/70">
                       <td className="px-4 py-3">
                         <div className="font-semibold text-zinc-900">{prod.name}</div>
@@ -646,7 +816,14 @@ export const CatalogManagement: React.FC = () => {
                       <td className="px-3 py-3 text-zinc-600">
                         {categoryMap.get(prod.categoryId) || '—'}
                       </td>
-                      <td className="px-3 py-3 text-zinc-600">{prod.unit}</td>
+                      <td className="px-3 py-3 text-zinc-600">
+                        <div className="font-medium text-zinc-800">{prod.unit}</div>
+                        {effectiveUnits.length > 1 && (
+                          <div className="text-[11px] text-zinc-500 tabular-nums">
+                            {formatUnitsSummary(effectiveUnits)}
+                          </div>
+                        )}
+                      </td>
                       <td className="px-3 py-3">
                         <StatusBadge
                           label={PRODUCT_APPROVAL_LABELS[prod.approvalStatus]}
@@ -683,7 +860,8 @@ export const CatalogManagement: React.FC = () => {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -700,7 +878,7 @@ export const CatalogManagement: React.FC = () => {
           }}
         >
           <div
-            className="w-full max-w-lg rounded-2xl bg-white border border-zinc-200 shadow-xl p-6 space-y-4"
+            className="w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl bg-white border border-zinc-200 shadow-xl p-6 space-y-4"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between gap-3">
@@ -773,7 +951,7 @@ export const CatalogManagement: React.FC = () => {
                     htmlFor="edit-product-unit"
                     className="block text-xs font-semibold text-zinc-700 mb-1"
                   >
-                    وحدة القياس
+                    الوحدة الأساسية (1)
                   </label>
                   <input
                     id="edit-product-unit"
@@ -784,6 +962,103 @@ export const CatalogManagement: React.FC = () => {
                     className="w-full min-h-[42px] rounded-xl border border-zinc-300 bg-white px-3 text-sm"
                   />
                 </div>
+              </div>
+
+              {/* Edit Sub-units Builder */}
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-bold text-zinc-800">
+                      الوحدات الفرعية للصنف
+                    </div>
+                    <div className="text-[11px] text-zinc-500">
+                      المعامل يحدد نسبة الوحدة من الوحدة الأساسية (مثال: نص = 0.5، ربع = 0.25)
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => applyPresetToEdit()}
+                      className="min-h-[30px] px-2.5 rounded-lg border border-zinc-200 bg-white text-[11px] font-semibold text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+                    >
+                      إضافة نص وربع
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyPresetToEdit('حبة')}
+                      className="min-h-[30px] px-2.5 rounded-lg border border-zinc-200 bg-white text-[11px] font-semibold text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+                    >
+                      حبة · نص · ربع
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditProdSubUnits((prev) =>
+                          prev.length < 9 ? [...prev, { name: '', factor: '0.5' }] : prev
+                        )
+                      }
+                      className="min-h-[30px] inline-flex items-center gap-1 px-2.5 rounded-lg bg-[#18181B] text-[11px] font-semibold text-white cursor-pointer"
+                    >
+                      <Plus className="h-3 w-3" />
+                      <span>وحدة فرعية</span>
+                    </button>
+                  </div>
+                </div>
+
+                {editProdSubUnits.length === 0 ? (
+                  <div className="text-[11px] text-zinc-400">
+                    لا توجد وحدات فرعية (وحدة واحدة فقط: {editProdUnit || 'وحدة'}).
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {editProdSubUnits.map((sub, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white p-2"
+                      >
+                        <input
+                          type="text"
+                          value={sub.name}
+                          onChange={(e) =>
+                            setEditProdSubUnits((prev) =>
+                              prev.map((row, i) =>
+                                i === idx ? { ...row, name: e.target.value } : row
+                              )
+                            )
+                          }
+                          placeholder="اسم الوحدة (مثال: نص)"
+                          className="flex-1 min-w-0 min-h-[34px] rounded-md border border-zinc-200 px-2 text-xs"
+                        />
+                        <input
+                          type="number"
+                          min="0.001"
+                          max="10000"
+                          step="any"
+                          value={sub.factor}
+                          onChange={(e) =>
+                            setEditProdSubUnits((prev) =>
+                              prev.map((row, i) =>
+                                i === idx ? { ...row, factor: e.target.value } : row
+                              )
+                            )
+                          }
+                          placeholder="0.5"
+                          className="w-20 min-h-[34px] rounded-md border border-zinc-200 px-2 text-center text-xs tabular-nums"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditProdSubUnits((prev) => prev.filter((_, i) => i !== idx))
+                          }
+                          aria-label="حذف الوحدة الفرعية"
+                          className="h-8 w-8 inline-flex items-center justify-center rounded-md text-zinc-400 hover:text-red-600 hover:bg-red-50 cursor-pointer shrink-0"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div>

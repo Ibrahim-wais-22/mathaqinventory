@@ -23,6 +23,34 @@ export async function ensureInitialSeedData(adminUser: UserAccount): Promise<voi
   try {
     const snap = await getDoc(settingsRef);
     if (snap.exists() && snap.data()?.seeded === true) {
+      // Idempotent backfill for already-seeded meat/chicken products missing `units`
+      const checkRef = doc(db, 'products', 'prod_mandi_chicken');
+      const checkSnap = await getDoc(checkRef);
+      if (
+        checkSnap.exists() &&
+        (!Array.isArray(checkSnap.data()?.units) || checkSnap.data()?.units.length === 0)
+      ) {
+        const backfillBatch = writeBatch(db);
+        let backfillCount = 0;
+        for (const prod of SEED_PRODUCTS) {
+          if (!prod.units || prod.units.length === 0) continue;
+          const prodRef = doc(db, 'products', prod.id);
+          const prodSnap = await getDoc(prodRef);
+          if (
+            prodSnap.exists() &&
+            (!Array.isArray(prodSnap.data()?.units) || prodSnap.data()?.units.length === 0)
+          ) {
+            backfillBatch.update(prodRef, {
+              units: prod.units,
+              updatedAt: serverTimestamp(),
+            });
+            backfillCount++;
+          }
+        }
+        if (backfillCount > 0) {
+          await backfillBatch.commit();
+        }
+      }
       return;
     }
 
@@ -63,7 +91,7 @@ export async function ensureInitialSeedData(adminUser: UserAccount): Promise<voi
       const prodRef = doc(db, 'products', prod.id);
       const prodSnap = await getDoc(prodRef);
       if (!prodSnap.exists()) {
-        batch.set(prodRef, {
+        const prodDoc: Record<string, unknown> = {
           name: prod.name,
           categoryId: prod.categoryId,
           unit: prod.unit,
@@ -78,7 +106,11 @@ export async function ensureInitialSeedData(adminUser: UserAccount): Promise<voi
           adminApprovedByName: adminUser.fullName.slice(0, 120),
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
-        });
+        };
+        if (prod.units && prod.units.length > 0) {
+          prodDoc.units = prod.units;
+        }
+        batch.set(prodRef, prodDoc);
         writeCount++;
       }
     }

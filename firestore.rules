@@ -54,6 +54,17 @@ service cloud.firestore {
     function isValidDateStr(val) {
       return val is string && val.size() == 10 && val.matches('^\\d{4}-\\d{2}-\\d{2}$');
     }
+    function isValidUnitOption(u) {
+      return u is map &&
+        u.keys().hasAll(['name', 'factor']) &&
+        u.keys().hasOnly(['name', 'factor']) &&
+        isNonEmptyString(u.name, 40) &&
+        (u.factor is int || u.factor is float) &&
+        u.factor > 0 && u.factor <= 10000;
+    }
+    function isValidBreakdownMap(m) {
+      return m is map && m.keys().size() <= 10;
+    }
     function sessionIsOpen(sessionId) {
       return get(/databases/$(database)/documents/dailySessions/$(sessionId)).data.status in ['open', 'reopened'];
     }
@@ -287,10 +298,15 @@ service cloud.firestore {
     // Products
     function isValidProduct(data) {
       return data.keys().hasAll(['name', 'categoryId', 'unit', 'isActive', 'approvalStatus', 'allowedDepartments', 'createdBy', 'createdByName', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['name', 'categoryId', 'unit', 'isActive', 'approvalStatus', 'allowedDepartments', 'createdBy', 'createdByName', 'technicalApprovedBy', 'technicalApprovedByName', 'adminApprovedBy', 'adminApprovedByName', 'rejectionReason', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'categoryId', 'unit', 'units', 'isActive', 'approvalStatus', 'allowedDepartments', 'createdBy', 'createdByName', 'technicalApprovedBy', 'technicalApprovedByName', 'adminApprovedBy', 'adminApprovedByName', 'rejectionReason', 'createdAt', 'updatedAt']) &&
         isNonEmptyString(data.name, 140) &&
         isValidId(data.categoryId) &&
         isNonEmptyString(data.unit, 40) &&
+        (!('units' in data) || (
+          data.units is list &&
+          data.units.size() <= 10 &&
+          (data.units.size() == 0 || isValidUnitOption(data.units[0]))
+        )) &&
         data.isActive is bool &&
         data.approvalStatus in ['pending_technical', 'pending_admin', 'approved', 'rejected', 'inactive'] &&
         data.allowedDepartments is list && data.allowedDepartments.size() <= 10 &&
@@ -394,7 +410,7 @@ service cloud.firestore {
     }
     function isValidDepartmentReportItem(data) {
       return data.keys().hasAll(['reportId', 'sessionId', 'branchId', 'inventoryDate', 'department', 'productId', 'categoryId', 'updatedBy', 'updatedByName', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['reportId', 'sessionId', 'branchId', 'inventoryDate', 'department', 'productId', 'categoryId', 'preparedQty', 'independentProductionQty', 'salesQty', 'damagedQty', 'validRemainingQty', 'invalidRemainingQty', 'note', 'updatedBy', 'updatedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['reportId', 'sessionId', 'branchId', 'inventoryDate', 'department', 'productId', 'categoryId', 'preparedQty', 'independentProductionQty', 'salesQty', 'damagedQty', 'validRemainingQty', 'invalidRemainingQty', 'unitBreakdowns', 'note', 'updatedBy', 'updatedByName', 'createdAt', 'updatedAt']) &&
         isValidId(data.reportId) &&
         isValidId(data.sessionId) &&
         isValidId(data.branchId) &&
@@ -408,6 +424,7 @@ service cloud.firestore {
         (!('damagedQty' in data) || data.damagedQty == null || isNonNegNumber(data.damagedQty)) &&
         (!('validRemainingQty' in data) || data.validRemainingQty == null || isNonNegNumber(data.validRemainingQty)) &&
         (!('invalidRemainingQty' in data) || data.invalidRemainingQty == null || isNonNegNumber(data.invalidRemainingQty)) &&
+        (!('unitBreakdowns' in data) || data.unitBreakdowns == null || (data.unitBreakdowns is map && data.unitBreakdowns.keys().size() <= 6)) &&
         (!('note' in data) || isValidString(data.note, 300)) &&
         isValidId(data.updatedBy) &&
         isNonEmptyString(data.updatedByName, 120) &&
@@ -521,7 +538,7 @@ service cloud.firestore {
     }
     function isValidFactoryTransferItem(data) {
       return data.keys().hasAll(['transferId', 'sessionId', 'productId', 'productName', 'unit', 'sentQty', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['transferId', 'sessionId', 'productId', 'productName', 'unit', 'sentQty', 'receivedQty', 'varianceQty', 'note', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transferId', 'sessionId', 'productId', 'productName', 'unit', 'sentQty', 'receivedQty', 'varianceQty', 'sentBreakdown', 'receivedBreakdown', 'note', 'createdAt', 'updatedAt']) &&
         isValidId(data.transferId) &&
         isValidId(data.sessionId) &&
         isValidId(data.productId) &&
@@ -530,6 +547,8 @@ service cloud.firestore {
         isNonNegNumber(data.sentQty) &&
         (!('receivedQty' in data) || data.receivedQty == null || isNonNegNumber(data.receivedQty)) &&
         (!('varianceQty' in data) || data.varianceQty == null || (data.varianceQty is int || data.varianceQty is float)) &&
+        (!('sentBreakdown' in data) || data.sentBreakdown == null || isValidBreakdownMap(data.sentBreakdown)) &&
+        (!('receivedBreakdown' in data) || data.receivedBreakdown == null || isValidBreakdownMap(data.receivedBreakdown)) &&
         (!('note' in data) || isValidString(data.note, 300)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -577,19 +596,20 @@ service cloud.firestore {
           sessionIsOpen(existing().sessionId) &&
           (isDept('production') || isBootstrapAdmin()) &&
           get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status == 'pending_receipt' &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['receivedQty', 'varianceQty', 'note', 'updatedAt']);
+          incoming().diff(existing()).affectedKeys().hasOnly(['receivedQty', 'receivedBreakdown', 'varianceQty', 'note', 'updatedAt']);
       }
     }
 
     // Independent Production Entries
     function isValidProductionEntry(data) {
       return data.keys().hasAll(['sessionId', 'branchId', 'inventoryDate', 'productId', 'qty', 'createdBy', 'createdByName', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'productId', 'qty', 'note', 'createdBy', 'createdByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'productId', 'qty', 'unitBreakdown', 'note', 'createdBy', 'createdByName', 'createdAt', 'updatedAt']) &&
         isValidId(data.sessionId) &&
         isValidId(data.branchId) &&
         isValidDateStr(data.inventoryDate) &&
         isValidId(data.productId) &&
         isNonNegNumber(data.qty) &&
+        (!('unitBreakdown' in data) || data.unitBreakdown == null || isValidBreakdownMap(data.unitBreakdown)) &&
         (!('note' in data) || isValidString(data.note, 300)) &&
         isValidId(data.createdBy) &&
         isNonEmptyString(data.createdByName, 120) &&

@@ -5,12 +5,14 @@ import type {
   OperationalDepartmentId,
   PermissionKey,
   ProductApprovalStatus,
+  ProductUnitOption,
   ReportStatus,
   SessionStatus,
   TransferStatus,
   UserRole,
   VarianceType,
 } from '../types/inventory';
+import { DEFAULT_CHICKEN_UNITS, DEFAULT_MEAT_UNITS } from '../utils/productUnits';
 
 export const BRAND_NAME = 'مطاعم المذاق اليمني';
 export const BRAND_ENGLISH = 'Al Mathaq Al Yemeni';
@@ -186,6 +188,7 @@ export interface SeedProductSpec {
   name: string;
   categoryId: string;
   unit: string;
+  units?: ProductUnitOption[];
   allowedDepartments: OperationalDepartmentId[];
 }
 
@@ -202,6 +205,7 @@ export const SEED_PRODUCTS: SeedProductSpec[] = [
     name: 'مندي لحم بلدي',
     categoryId: 'cat_meats',
     unit: 'نفر',
+    units: DEFAULT_MEAT_UNITS,
     allowedDepartments: ['factory', 'production', 'sales', 'waste'],
   },
   {
@@ -209,6 +213,7 @@ export const SEED_PRODUCTS: SeedProductSpec[] = [
     name: 'حنيذ لحم',
     categoryId: 'cat_meats',
     unit: 'نفر',
+    units: DEFAULT_MEAT_UNITS,
     allowedDepartments: ['factory', 'production', 'sales', 'waste'],
   },
   {
@@ -216,6 +221,7 @@ export const SEED_PRODUCTS: SeedProductSpec[] = [
     name: 'زربيان لحم عدني',
     categoryId: 'cat_meats',
     unit: 'نفر',
+    units: DEFAULT_MEAT_UNITS,
     allowedDepartments: ['factory', 'production', 'sales', 'waste'],
   },
   {
@@ -223,6 +229,7 @@ export const SEED_PRODUCTS: SeedProductSpec[] = [
     name: 'مظبي دجاج على الحجر',
     categoryId: 'cat_chicken',
     unit: 'حبة',
+    units: DEFAULT_CHICKEN_UNITS,
     allowedDepartments: ['factory', 'production', 'sales', 'waste'],
   },
   {
@@ -230,6 +237,7 @@ export const SEED_PRODUCTS: SeedProductSpec[] = [
     name: 'مندي دجاج',
     categoryId: 'cat_chicken',
     unit: 'حبة',
+    units: DEFAULT_CHICKEN_UNITS,
     allowedDepartments: ['factory', 'production', 'sales', 'waste'],
   },
   {
@@ -237,6 +245,7 @@ export const SEED_PRODUCTS: SeedProductSpec[] = [
     name: 'مضغوط دجاج',
     categoryId: 'cat_chicken',
     unit: 'حبة',
+    units: DEFAULT_CHICKEN_UNITS,
     allowedDepartments: ['factory', 'production', 'sales', 'waste'],
   },
   {

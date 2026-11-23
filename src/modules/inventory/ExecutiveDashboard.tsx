@@ -26,7 +26,7 @@ import {
 } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { OperationType, db, handleFirestoreError } from '../../services/firebase/config';
-import { checkSessionClosingReadiness } from '../../services/inventory/calculator';
+import { checkSessionClosingReadiness, roundQty } from '../../services/inventory/calculator';
 import {
   closeDailySession,
   formatActionError,
@@ -184,7 +184,7 @@ export const ExecutiveDashboard: React.FC<{
   );
 
   const kpis = useMemo(() => {
-    return results.reduce(
+    const totals = results.reduce(
       (acc, r) => {
         acc.factoryReceived += r.factoryReceivedQty;
         acc.indProduction += r.independentProductionQty;
@@ -205,6 +205,15 @@ export const ExecutiveDashboard: React.FC<{
         varianceItemsCount: 0,
       }
     );
+    return {
+      factoryReceived: roundQty(totals.factoryReceived),
+      indProduction: roundQty(totals.indProduction),
+      sales: roundQty(totals.sales),
+      damaged: roundQty(totals.damaged),
+      validRemaining: roundQty(totals.validRemaining),
+      invalidRemaining: roundQty(totals.invalidRemaining),
+      varianceItemsCount: totals.varianceItemsCount,
+    };
   }, [results]);
 
   const varianceRows = useMemo(() => results.filter((r) => r.variance !== 0), [results]);
@@ -472,7 +481,7 @@ export const ExecutiveDashboard: React.FC<{
                       <td className="px-3 py-2.5 tabular-nums">{r.totalAvailable}</td>
                       <td className="px-3 py-2.5 tabular-nums">{r.salesQty}</td>
                       <td className="px-3 py-2.5 tabular-nums">
-                        {r.validRemainingQty + r.invalidRemainingQty}
+                        {roundQty(r.validRemainingQty + r.invalidRemainingQty)}
                       </td>
                       <td className="px-3 py-2.5">
                         <StatusBadge

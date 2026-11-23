@@ -44,8 +44,17 @@ import type {
   Product,
   ProductResult,
   ProductionEntry,
+  UnitBreakdown,
 } from '../../types/inventory';
+import { roundQty } from '../../services/inventory/calculator';
+import {
+  decomposeTotalToUnitCounts,
+  formatBreakdownText,
+  getEffectiveProductUnits,
+  sumUnitCounts,
+} from '../../utils/productUnits';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
+import { MultiUnitQtyInput } from '../../components/common/MultiUnitQtyInput';
 import { StatusBadge } from '../../components/common/StatusBadge';
 import { formatTimestampAden } from '../../utils/dateAden';
 
@@ -71,12 +80,14 @@ export const ProductionWorkspace: React.FC = () => {
   const [transferItems, setTransferItems] = useState<FactoryTransferItem[]>([]);
   const [loadingTransferItems, setLoadingTransferItems] = useState(false);
   const [receivedQtyMap, setReceivedQtyMap] = useState<Record<string, string>>({});
+  const [receivedCountsMap, setReceivedCountsMap] = useState<Record<string, Record<string, string>>>({});
   const [itemNoteMap, setItemNoteMap] = useState<Record<string, string>>({});
   const [productionNote, setProductionNote] = useState('');
 
   const [indEntries, setIndEntries] = useState<ProductionEntry[]>([]);
   const [indProdId, setIndProdId] = useState('');
   const [indQty, setIndQty] = useState('');
+  const [indCounts, setIndCounts] = useState<Record<string, string>>({});
   const [indNote, setIndNote] = useState('');
 
   const [techApprovals, setTechApprovals] = useState<ApprovalRequest[]>([]);
@@ -91,6 +102,7 @@ export const ProductionWorkspace: React.FC = () => {
 
   const [corrTarget, setCorrTarget] = useState<Product | null>(null);
   const [corrNewVal, setCorrNewVal] = useState('');
+  const [corrCounts, setCorrCounts] = useState<Record<string, string>>({});
   const [corrReason, setCorrReason] = useState('');
 
   const canReadResults = hasPermission('view_results');
@@ -115,6 +127,10 @@ export const ProductionWorkspace: React.FC = () => {
 
   const categoryMap = useMemo(() => new Map(categories.map((c) => [c.id, c.name])), [categories]);
   const productMap = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
+  const selectedIndProduct = useMemo(
+    () => approvedProducts.find((p) => p.id === (indProdId || approvedProducts[0]?.id)) || null,
+    [approvedProducts, indProdId]
+  );
 
   useEffect(() => {
     setReport(null);
@@ -228,6 +244,18 @@ export const ProductionWorkspace: React.FC = () => {
     };
   }, [account?.uid, currentSession?.id, canReadResults]);
 
+  const getItemProductShape = (item: FactoryTransferItem) => {
+    const found = productMap.get(item.productId);
+    if (found) return found;
+    return {
+      id: item.productId,
+      name: item.productName,
+      unit: item.unit,
+      categoryId: '',
+      units: undefined,
+    };
+  };
+
   const openTransferDetail = async (trf: FactoryTransfer) => {
     setSelectedTransfer(trf);
     setTransferItems([]);
@@ -242,15 +270,25 @@ export const ProductionWorkspace: React.FC = () => {
       }));
       setTransferItems(items);
       const recInit: Record<string, string> = {};
+      const recCountsInit: Record<string, Record<string, string>> = {};
       const noteInit: Record<string, string> = {};
       items.forEach((it) => {
-        recInit[it.productId] =
+        const targetVal =
+          it.receivedQty !== null && it.receivedQty !== undefined ? it.receivedQty : it.sentQty;
+        const targetBreakdown =
           it.receivedQty !== null && it.receivedQty !== undefined
-            ? String(it.receivedQty)
-            : String(it.sentQty);
+            ? it.receivedBreakdown
+            : it.sentBreakdown;
+        recInit[it.productId] = String(targetVal);
+        recCountsInit[it.productId] = decomposeTotalToUnitCounts(
+          targetVal,
+          getEffectiveProductUnits(getItemProductShape(it)),
+          targetBreakdown
+        );
         noteInit[it.productId] = it.note || '';
       });
       setReceivedQtyMap(recInit);
+      setReceivedCountsMap(recCountsInit);
       setItemNoteMap(noteInit);
     } catch (err) {
       setFeedback({
@@ -275,14 +313,29 @@ export const ProductionWorkspace: React.FC = () => {
     setFeedback(null);
     try {
       const rows = transferItems.map((item) => {
-        const raw = receivedQtyMap[item.productId];
-        const val = raw === undefined || raw === '' ? 0 : Number(raw);
-        if (Number.isNaN(val) || val < 0) {
-          throw new Error(`الكمية المستلمة للصنف "${item.productName}" غير صحيحة.`);
+        const units = getEffectiveProductUnits(getItemProductShape(item));
+        const counts = receivedCountsMap[item.productId];
+        let val = 0;
+        let receivedBreakdown: UnitBreakdown | undefined;
+
+        if (counts && Object.keys(counts).length > 0) {
+          const summed = sumUnitCounts(units, counts);
+          if (summed.hasInvalid) {
+            throw new Error(`الكمية المستلمة للصنف "${item.productName}" غير صحيحة.`);
+          }
+          val = summed.total ?? 0;
+          receivedBreakdown = summed.breakdown;
+        } else {
+          const raw = receivedQtyMap[item.productId];
+          val = raw === undefined || raw === '' ? 0 : Number(raw);
+          if (Number.isNaN(val) || val < 0) {
+            throw new Error(`الكمية المستلمة للصنف "${item.productName}" غير صحيحة.`);
+          }
         }
         return {
           item,
-          receivedQty: val,
+          receivedQty: roundQty(val),
+          receivedBreakdown,
           note: itemNoteMap[item.productId] || '',
         };
       });
@@ -325,10 +378,18 @@ export const ProductionWorkspace: React.FC = () => {
       const targetId = indProdId || approvedProducts[0]?.id;
       const prod = approvedProducts.find((p) => p.id === targetId);
       if (!prod) throw new Error('يرجى اختيار صنف معتمد.');
-      const qty = Number(indQty);
-      if (Number.isNaN(qty) || qty <= 0) throw new Error('أدخل كمية إنتاج أكبر من صفر.');
-      await addIndependentProduction(account, currentSession, prod, qty, indNote);
+      const units = getEffectiveProductUnits(prod);
+      const { total, breakdown, hasInvalid } =
+        Object.keys(indCounts).length > 0
+          ? sumUnitCounts(units, indCounts)
+          : { total: indQty ? Number(indQty) : 0, breakdown: undefined, hasInvalid: false };
+      const qty = total ?? 0;
+      if (hasInvalid || Number.isNaN(qty) || qty <= 0) {
+        throw new Error('أدخل كمية إنتاج أكبر من صفر.');
+      }
+      await addIndependentProduction(account, currentSession, prod, qty, indNote, breakdown);
       setIndQty('');
+      setIndCounts({});
       setIndNote('');
       setFeedback({
         type: 'success',
@@ -453,6 +514,7 @@ export const ProductionWorkspace: React.FC = () => {
       );
       setCorrTarget(null);
       setCorrNewVal('');
+      setCorrCounts({});
       setCorrReason('');
       setFeedback({
         type: 'success',
@@ -716,8 +778,20 @@ export const ProductionWorkspace: React.FC = () => {
                       </thead>
                       <tbody className="divide-y divide-zinc-100 text-sm">
                         {transferItems.map((item) => {
+                          const itemProd = getItemProductShape(item);
+                          const effectiveUnits = getEffectiveProductUnits(itemProd);
                           const recVal = Number(receivedQtyMap[item.productId] ?? item.sentQty);
-                          const diff = Math.round((item.sentQty - recVal) * 1000) / 1000;
+                          const diff = roundQty(item.sentQty - recVal);
+                          const sentBreakdownStr = formatBreakdownText(item.sentBreakdown, effectiveUnits);
+                          const recCounts =
+                            receivedCountsMap[item.productId] ??
+                            decomposeTotalToUnitCounts(
+                              item.receivedQty ?? item.sentQty,
+                              effectiveUnits,
+                              item.receivedQty !== null && item.receivedQty !== undefined
+                                ? item.receivedBreakdown
+                                : item.sentBreakdown
+                            );
                           return (
                             <tr key={item.productId}>
                               <td className="px-4 py-3 font-semibold text-zinc-900">
@@ -725,31 +799,42 @@ export const ProductionWorkspace: React.FC = () => {
                                 <div className="text-xs font-normal text-zinc-500">{item.unit}</div>
                               </td>
                               <td className="px-3 py-3 font-bold tabular-nums text-zinc-700">
-                                {item.sentQty}
+                                <div>{item.sentQty}</div>
+                                {sentBreakdownStr && (
+                                  <div className="text-[11px] font-normal text-zinc-500">
+                                    {sentBreakdownStr}
+                                  </div>
+                                )}
                               </td>
                               <td className="px-3 py-3">
-                                {isDeptQtyReadOnly ? (
-                                  <span className="font-semibold tabular-nums text-zinc-800">
-                                    {selectedTransfer.status === 'pending_receipt'
-                                      ? 'بانتظار الاستلام'
-                                      : item.receivedQty ?? '—'}
-                                  </span>
+                                {isDeptQtyReadOnly && selectedTransfer.status === 'pending_receipt' ? (
+                                  <span className="font-semibold text-zinc-500">بانتظار الاستلام</span>
                                 ) : (
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step="any"
+                                  <MultiUnitQtyInput
+                                    product={itemProd}
+                                    counts={recCounts}
+                                    totalValue={
+                                      isDeptQtyReadOnly
+                                        ? item.receivedQty !== null && item.receivedQty !== undefined
+                                          ? String(item.receivedQty)
+                                          : ''
+                                        : receivedQtyMap[item.productId] ?? ''
+                                    }
+                                    readOnly={isDeptQtyReadOnly}
                                     disabled={
                                       selectedTransfer.status !== 'pending_receipt' || isSessionClosed
                                     }
-                                    value={receivedQtyMap[item.productId] ?? ''}
-                                    onChange={(e) =>
+                                    compact
+                                    onChange={(nextCounts, nextTotalStr) => {
+                                      setReceivedCountsMap((prev) => ({
+                                        ...prev,
+                                        [item.productId]: nextCounts,
+                                      }));
                                       setReceivedQtyMap((prev) => ({
                                         ...prev,
-                                        [item.productId]: e.target.value,
-                                      }))
-                                    }
-                                    className="w-24 min-h-[40px] rounded-xl border border-zinc-200 px-2 text-center font-semibold tabular-nums disabled:bg-zinc-100"
+                                        [item.productId]: nextTotalStr,
+                                      }));
+                                    }}
                                   />
                                 )}
                               </td>
@@ -836,7 +921,11 @@ export const ProductionWorkspace: React.FC = () => {
                 <label className="block text-xs font-semibold text-zinc-700 mb-1">الصنف</label>
                 <select
                   value={indProdId || approvedProducts[0]?.id || ''}
-                  onChange={(e) => setIndProdId(e.target.value)}
+                  onChange={(e) => {
+                    setIndProdId(e.target.value);
+                    setIndQty('');
+                    setIndCounts({});
+                  }}
                   disabled={isSessionClosed || isSubmitted}
                   className="w-full min-h-[44px] rounded-xl border border-zinc-200 px-3 text-sm disabled:bg-zinc-100"
                 >
@@ -848,18 +937,31 @@ export const ProductionWorkspace: React.FC = () => {
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-semibold text-zinc-700 mb-1">الكمية المنتجة</label>
-                <input
-                  type="number"
-                  min="0.1"
-                  step="any"
-                  required
-                  disabled={isSessionClosed || isSubmitted}
-                  value={indQty}
-                  onChange={(e) => setIndQty(e.target.value)}
-                  placeholder="أدخل العدد"
-                  className="w-full min-h-[44px] rounded-xl border border-zinc-200 px-3 text-sm tabular-nums disabled:bg-zinc-100"
-                />
+                <label className="block text-xs font-semibold text-zinc-700 mb-1.5">الكمية المنتجة</label>
+                {selectedIndProduct ? (
+                  <MultiUnitQtyInput
+                    product={selectedIndProduct}
+                    counts={indCounts}
+                    totalValue={indQty}
+                    fullWidth
+                    disabled={isSessionClosed || isSubmitted}
+                    placeholder="أدخل العدد"
+                    onChange={(nextCounts, nextTotalStr) => {
+                      setIndCounts(nextCounts);
+                      setIndQty(nextTotalStr);
+                    }}
+                  />
+                ) : (
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    disabled
+                    value=""
+                    placeholder="اختر صنفاً"
+                    className="w-full min-h-[44px] rounded-xl border border-zinc-200 px-3 text-sm bg-zinc-100"
+                  />
+                )}
               </div>
               <div>
                 <label className="block text-xs font-semibold text-zinc-700 mb-1">ملاحظة</label>
@@ -901,8 +1003,12 @@ export const ProductionWorkspace: React.FC = () => {
                       approvedProducts[0] ||
                       null;
                     if (target) {
+                      const val = submittedIndMap[target.id] ?? 0;
                       setCorrTarget(target);
-                      setCorrNewVal(String(submittedIndMap[target.id] ?? 0));
+                      setCorrNewVal(String(val));
+                      setCorrCounts(
+                        decomposeTotalToUnitCounts(val, getEffectiveProductUnits(target))
+                      );
                     }
                   }}
                   className="inline-flex items-center gap-1 text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer"
@@ -920,6 +1026,10 @@ export const ProductionWorkspace: React.FC = () => {
               <div className="divide-y divide-zinc-100">
                 {indEntries.map((entry) => {
                   const p = productMap.get(entry.productId);
+                  const bdStr = formatBreakdownText(
+                    entry.unitBreakdown,
+                    p ? getEffectiveProductUnits(p) : undefined
+                  );
                   return (
                     <div key={entry.id} className="p-4 flex items-center justify-between gap-4">
                       <div>
@@ -932,15 +1042,24 @@ export const ProductionWorkspace: React.FC = () => {
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
-                        <span className="text-base font-extrabold text-zinc-900 tabular-nums">
-                          +{entry.qty} {p?.unit || ''}
-                        </span>
+                        <div className="text-left">
+                          <div className="text-base font-extrabold text-zinc-900 tabular-nums">
+                            +{entry.qty} {p?.unit || ''}
+                          </div>
+                          {bdStr && (
+                            <div className="text-[11px] text-zinc-500 tabular-nums">{bdStr}</div>
+                          )}
+                        </div>
                         {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && p && (
                           <button
                             type="button"
                             onClick={() => {
+                              const val = submittedIndMap[p.id] ?? entry.qty;
                               setCorrTarget(p);
-                              setCorrNewVal(String(submittedIndMap[p.id] ?? entry.qty));
+                              setCorrNewVal(String(val));
+                              setCorrCounts(
+                                decomposeTotalToUnitCounts(val, getEffectiveProductUnits(p))
+                              );
                             }}
                             className="inline-flex items-center gap-1 text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer"
                           >
@@ -1098,8 +1217,12 @@ export const ProductionWorkspace: React.FC = () => {
                 onChange={(e) => {
                   const found = approvedProducts.find((p) => p.id === e.target.value);
                   if (found) {
+                    const val = submittedIndMap[found.id] ?? 0;
                     setCorrTarget(found);
-                    setCorrNewVal(String(submittedIndMap[found.id] ?? 0));
+                    setCorrNewVal(String(val));
+                    setCorrCounts(
+                      decomposeTotalToUnitCounts(val, getEffectiveProductUnits(found))
+                    );
                   }
                 }}
                 className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
@@ -1112,16 +1235,18 @@ export const ProductionWorkspace: React.FC = () => {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1">
+              <label className="block text-xs font-semibold text-zinc-700 mb-1.5">
                 الكمية الجديدة للإنتاج المستقل
               </label>
-              <input
-                type="number"
-                min="0"
-                step="any"
-                value={corrNewVal}
-                onChange={(e) => setCorrNewVal(e.target.value)}
-                className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm tabular-nums"
+              <MultiUnitQtyInput
+                product={corrTarget}
+                counts={corrCounts}
+                totalValue={corrNewVal}
+                fullWidth
+                onChange={(nextCounts, nextTotalStr) => {
+                  setCorrCounts(nextCounts);
+                  setCorrNewVal(nextTotalStr);
+                }}
               />
             </div>
             <div>
