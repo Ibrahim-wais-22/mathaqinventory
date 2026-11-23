@@ -546,23 +546,79 @@ export async function updateProductByAdmin(
     allowedDepartments: OperationalDepartmentId[];
   }
 ): Promise<void> {
+  const cleanName = updates.name.trim().slice(0, 140);
+  const cleanUnit = updates.unit.trim().slice(0, 40);
+  if (!cleanName) {
+    throw new Error('يرجى إدخال اسم الصنف.');
+  }
+  if (!cleanUnit) {
+    throw new Error('يرجى إدخال وحدة القياس.');
+  }
+  if (!updates.categoryId) {
+    throw new Error('يرجى اختيار المجموعة.');
+  }
+  if (!updates.allowedDepartments || updates.allowedDepartments.length === 0) {
+    throw new Error('اختر إدارة واحدة على الأقل.');
+  }
+
   try {
     await updateDoc(doc(db, 'products', product.id), {
-      name: updates.name.trim().slice(0, 140),
+      name: cleanName,
       categoryId: updates.categoryId,
-      unit: updates.unit.trim().slice(0, 40),
+      unit: cleanUnit,
       isActive: updates.isActive,
       approvalStatus: updates.isActive ? 'approved' : 'inactive',
       allowedDepartments: updates.allowedDepartments,
       updatedAt: serverTimestamp(),
     });
+
+    // Best-effort sync of non-finalized daily result rows when name, unit, or category changed
+    if (
+      cleanName !== product.name ||
+      cleanUnit !== product.unit ||
+      updates.categoryId !== product.categoryId
+    ) {
+      try {
+        let nextCategoryName: string | undefined;
+        if (updates.categoryId !== product.categoryId) {
+          const catSnap = await getDoc(doc(db, 'categories', updates.categoryId));
+          if (catSnap.exists()) {
+            nextCategoryName = String(catSnap.data()?.name || '').slice(0, 100);
+          }
+        }
+        const resultsSnap = await getDocs(
+          query(collection(db, 'productResults'), where('productId', '==', product.id))
+        );
+        const openDocs = resultsSnap.docs.filter((d) => d.data()?.isFinalized === false);
+        if (openDocs.length > 0) {
+          const syncBatch = writeBatch(db);
+          for (const resDoc of openDocs) {
+            const patch: Record<string, unknown> = {
+              productName: cleanName,
+              unit: cleanUnit,
+              categoryId: updates.categoryId,
+              computedBy: actor.uid,
+              updatedAt: serverTimestamp(),
+            };
+            if (nextCategoryName) {
+              patch.categoryName = nextCategoryName;
+            }
+            syncBatch.update(resDoc.ref, patch);
+          }
+          await syncBatch.commit();
+        }
+      } catch (syncErr) {
+        console.warn('Product results name sync skipped:', syncErr);
+      }
+    }
+
     await appendAuditLog({
       actor,
       action: 'تعديل_بيانات_صنف',
       targetCollection: 'products',
       targetId: product.id,
       oldValueSummary: `${product.name} · ${product.unit} · ${product.isActive ? 'نشط' : 'موقوف'}`,
-      newValueSummary: `${updates.name} · ${updates.unit} · ${updates.isActive ? 'نشط' : 'موقوف'}`,
+      newValueSummary: `${cleanName} · ${cleanUnit} · ${updates.isActive ? 'نشط' : 'موقوف'}`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `products/${product.id}`);

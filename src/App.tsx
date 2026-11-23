@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { FirebaseProvider, useFirebase } from './app/providers/FirebaseProvider';
 import { AppShell } from './app/layouts/AppShell';
+import { BrandLogo } from './components/common/BrandLogo';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
-import { BOOTSTRAP_ADMIN_EMAIL } from './constants/departments';
+import { BOOTSTRAP_ADMIN_EMAIL, BRAND_NAME } from './constants/departments';
 import { LoginScreen } from './modules/authentication/LoginScreen';
 import { PendingActivationScreen } from './modules/authentication/PendingActivationScreen';
 import { FactoryWorkspace } from './modules/factory/FactoryWorkspace';
@@ -39,11 +40,15 @@ const AuthenticatedApp: React.FC = () => {
   if (authLoading) {
     return (
       <div className="min-h-screen bg-[#FAFAFA] flex items-center justify-center p-6" dir="rtl">
-        <div className="text-center space-y-3">
-          <div className="h-10 w-10 mx-auto rounded-full border-4 border-zinc-200 border-t-[#D91B23] animate-spin" />
-          <p className="text-sm font-semibold text-zinc-600">
-            جاري تحميل بيانات نظام المذاق اليمني...
-          </p>
+        <div className="text-center space-y-4">
+          <div className="flex justify-center">
+            <BrandLogo size="lg" />
+          </div>
+          <div className="h-8 w-8 mx-auto rounded-full border-3 border-zinc-200 border-t-[#D91B23] animate-spin" />
+          <div className="space-y-1">
+            <p className="text-sm font-bold text-zinc-900 font-display">{BRAND_NAME}</p>
+            <p className="text-xs font-medium text-zinc-500">جاري التحقق من جلسة الدخول...</p>
+          </div>
         </div>
       </div>
     );

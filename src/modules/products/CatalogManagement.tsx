@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Edit3, FolderPlus, PackagePlus, XCircle } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { CheckCircle2, Edit3, FolderPlus, PackagePlus, X, XCircle } from 'lucide-react';
 import {
   DEPARTMENT_LABELS,
   OPERATIONAL_DEPARTMENTS,
@@ -20,10 +20,14 @@ import { StatusBadge } from '../../components/common/StatusBadge';
 export const CatalogManagement: React.FC = () => {
   const { account, categories, products } = useFirebase();
 
+  const catInputRef = useRef<HTMLInputElement>(null);
+  const editProdInputRef = useRef<HTMLInputElement>(null);
+
   const [catName, setCatName] = useState('');
   const [catOrder, setCatOrder] = useState('1');
   const [editingCat, setEditingCat] = useState<Category | null>(null);
 
+  // Add new product form state
   const [prodName, setProdName] = useState('');
   const [prodCatId, setProdCatId] = useState('');
   const [prodUnit, setProdUnit] = useState('نفر');
@@ -33,7 +37,15 @@ export const CatalogManagement: React.FC = () => {
     'sales',
     'waste',
   ]);
+
+  // Edit product modal state
   const [editingProd, setEditingProd] = useState<Product | null>(null);
+  const [editProdName, setEditProdName] = useState('');
+  const [editProdCatId, setEditProdCatId] = useState('');
+  const [editProdUnit, setEditProdUnit] = useState('');
+  const [editProdIsActive, setEditProdIsActive] = useState(true);
+  const [editProdDepts, setEditProdDepts] = useState<OperationalDepartmentId[]>([]);
+  const [editModalError, setEditModalError] = useState<string | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -53,6 +65,15 @@ export const CatalogManagement: React.FC = () => {
     }
   }, [nextCategoryOrder, editingCat]);
 
+  useEffect(() => {
+    if (editingProd) {
+      setTimeout(() => {
+        editProdInputRef.current?.focus();
+        editProdInputRef.current?.select();
+      }, 20);
+    }
+  }, [editingProd?.id]);
+
   const categoryMap = useMemo(() => new Map(categories.map((c) => [c.id, c.name])), [categories]);
   const productCountByCategory = useMemo(() => {
     const counts = new Map<string, number>();
@@ -71,6 +92,26 @@ export const CatalogManagement: React.FC = () => {
     setProdDepts((prev) =>
       prev.includes(dept) ? prev.filter((d) => d !== dept) : [...prev, dept]
     );
+  };
+
+  const toggleEditDept = (dept: OperationalDepartmentId) => {
+    setEditProdDepts((prev) =>
+      prev.includes(dept) ? prev.filter((d) => d !== dept) : [...prev, dept]
+    );
+  };
+
+  const openEditProductModal = (prod: Product) => {
+    setEditingProd(prod);
+    setEditProdName(prod.name);
+    setEditProdCatId(prod.categoryId || categories[0]?.id || '');
+    setEditProdUnit(prod.unit || 'نفر');
+    setEditProdIsActive(prod.isActive);
+    setEditProdDepts(
+      prod.allowedDepartments && prod.allowedDepartments.length > 0
+        ? [...prod.allowedDepartments]
+        : ['factory', 'production', 'sales', 'waste']
+    );
+    setEditModalError(null);
   };
 
   const handleSaveCategory = async (e: React.FormEvent) => {
@@ -145,13 +186,28 @@ export const CatalogManagement: React.FC = () => {
     }
   };
 
-  const handleSaveProduct = async (e: React.FormEvent) => {
+  const handleCreateProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!account) return;
-    if (!prodName.trim()) {
+    const trimmedName = prodName.trim();
+    const trimmedUnit = prodUnit.trim();
+    if (!trimmedName) {
       setFeedback({ type: 'error', text: 'يرجى إدخال اسم الصنف.' });
       return;
     }
+    if (!trimmedUnit) {
+      setFeedback({ type: 'error', text: 'يرجى إدخال وحدة القياس.' });
+      return;
+    }
+
+    const duplicate = products.find(
+      (p) => p.name.trim().toLowerCase() === trimmedName.toLowerCase()
+    );
+    if (duplicate) {
+      setFeedback({ type: 'error', text: `الصنف "${trimmedName}" مسجل بالفعل.` });
+      return;
+    }
+
     setBusy(true);
     setFeedback(null);
     try {
@@ -159,28 +215,70 @@ export const CatalogManagement: React.FC = () => {
       if (!targetCat) throw new Error('أضف مجموعة أصناف أولاً.');
       if (prodDepts.length === 0) throw new Error('اختر إدارة واحدة على الأقل.');
 
-      if (editingProd) {
-        await updateProductByAdmin(account, editingProd, {
-          name: prodName,
-          categoryId: targetCat,
-          unit: prodUnit,
-          isActive: editingProd.isActive,
-          allowedDepartments: prodDepts,
-        });
-        setEditingProd(null);
-        setFeedback({ type: 'success', text: 'تم تحديث بيانات الصنف بنجاح.' });
-      } else {
-        await createProductByAdmin(account, {
-          name: prodName,
-          categoryId: targetCat,
-          unit: prodUnit,
-          allowedDepartments: prodDepts,
-        });
-        setFeedback({ type: 'success', text: 'تم إنشاء الصنف واعتماده مباشرة.' });
-      }
+      await createProductByAdmin(account, {
+        name: trimmedName,
+        categoryId: targetCat,
+        unit: trimmedUnit,
+        allowedDepartments: prodDepts,
+      });
+      setFeedback({ type: 'success', text: `تم إنشاء الصنف "${trimmedName}" واعتماده مباشرة.` });
       setProdName('');
     } catch (err) {
       setFeedback({ type: 'error', text: formatActionError(err, 'تعذر حفظ الصنف.') });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveEditedProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!account || !editingProd) return;
+
+    const trimmedName = editProdName.trim();
+    const trimmedUnit = editProdUnit.trim();
+    const targetCat = editProdCatId || categories[0]?.id || editingProd.categoryId;
+
+    if (!trimmedName) {
+      setEditModalError('يرجى إدخال اسم الصنف.');
+      return;
+    }
+    if (!trimmedUnit) {
+      setEditModalError('يرجى إدخال وحدة القياس.');
+      return;
+    }
+    if (!targetCat) {
+      setEditModalError('يرجى اختيار المجموعة.');
+      return;
+    }
+    if (editProdDepts.length === 0) {
+      setEditModalError('اختر إدارة واحدة على الأقل.');
+      return;
+    }
+
+    const duplicate = products.find(
+      (p) =>
+        p.id !== editingProd.id && p.name.trim().toLowerCase() === trimmedName.toLowerCase()
+    );
+    if (duplicate) {
+      setEditModalError(`يوجد صنف آخر بنفس الاسم "${trimmedName}".`);
+      return;
+    }
+
+    setBusy(true);
+    setEditModalError(null);
+    setFeedback(null);
+    try {
+      await updateProductByAdmin(account, editingProd, {
+        name: trimmedName,
+        categoryId: targetCat,
+        unit: trimmedUnit,
+        isActive: editProdIsActive,
+        allowedDepartments: editProdDepts,
+      });
+      setEditingProd(null);
+      setFeedback({ type: 'success', text: `تم تحديث الصنف "${trimmedName}" بنجاح.` });
+    } catch (err) {
+      setEditModalError(formatActionError(err, 'تعذر تحديث بيانات الصنف.'));
     } finally {
       setBusy(false);
     }
@@ -194,9 +292,12 @@ export const CatalogManagement: React.FC = () => {
       await updateProductByAdmin(account, prod, {
         name: prod.name,
         categoryId: prod.categoryId,
-        unit: prod.unit,
+        unit: prod.unit || 'نفر',
         isActive: !prod.isActive,
-        allowedDepartments: prod.allowedDepartments,
+        allowedDepartments:
+          prod.allowedDepartments && prod.allowedDepartments.length > 0
+            ? prod.allowedDepartments
+            : ['factory', 'production', 'sales', 'waste'],
       });
       setFeedback({
         type: 'success',
@@ -326,6 +427,7 @@ export const CatalogManagement: React.FC = () => {
                 اسم المجموعة
               </label>
               <input
+                ref={catInputRef}
                 type="text"
                 value={catName}
                 onChange={(e) => setCatName(e.target.value)}
@@ -400,8 +502,12 @@ export const CatalogManagement: React.FC = () => {
                         setEditingCat(cat);
                         setCatName(cat.name);
                         setCatOrder(String(cat.sortOrder));
+                        setTimeout(() => {
+                          catInputRef.current?.focus();
+                          catInputRef.current?.select();
+                        }, 10);
                       }}
-                      className="text-xs text-zinc-600 hover:text-zinc-900 cursor-pointer"
+                      className="text-xs text-zinc-600 hover:text-zinc-900 font-semibold cursor-pointer disabled:opacity-50"
                     >
                       تعديل
                     </button>
@@ -409,7 +515,7 @@ export const CatalogManagement: React.FC = () => {
                       type="button"
                       disabled={busy}
                       onClick={() => void handleToggleCategory(cat)}
-                      className={`text-xs font-semibold cursor-pointer ${
+                      className={`text-xs font-semibold cursor-pointer disabled:opacity-50 ${
                         cat.isActive ? 'text-red-600' : 'text-emerald-600'
                       }`}
                     >
@@ -425,43 +531,53 @@ export const CatalogManagement: React.FC = () => {
         {/* Products */}
         <div className="lg:col-span-8 space-y-6">
           <form
-            onSubmit={handleSaveProduct}
+            onSubmit={handleCreateProduct}
+            noValidate
             className="bg-white border border-zinc-200 rounded-2xl p-5 space-y-4"
           >
             <div className="flex items-center gap-2">
               <PackagePlus className="h-5 w-5 text-[#D91B23]" />
               <h3 className="text-base font-bold text-zinc-900 font-display">
-                {editingProd ? `تعديل الصنف: ${editingProd.name}` : 'إضافة صنف جديد معتمد'}
+                إضافة صنف جديد معتمد
               </h3>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <input
-                type="text"
-                required
-                value={prodName}
-                onChange={(e) => setProdName(e.target.value)}
-                placeholder="اسم الصنف"
-                className="min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
-              />
-              <select
-                value={prodCatId || categories[0]?.id || ''}
-                onChange={(e) => setProdCatId(e.target.value)}
-                className="min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
-              >
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-              <input
-                type="text"
-                required
-                value={prodUnit}
-                onChange={(e) => setProdUnit(e.target.value)}
-                placeholder="وحدة القياس"
-                className="min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
-              />
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 mb-1">اسم الصنف</label>
+                <input
+                  type="text"
+                  value={prodName}
+                  onChange={(e) => setProdName(e.target.value)}
+                  placeholder="مثال: مندي لحم"
+                  className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 mb-1">المجموعة</label>
+                <select
+                  value={prodCatId || categories[0]?.id || ''}
+                  onChange={(e) => setProdCatId(e.target.value)}
+                  className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm bg-white"
+                >
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                  وحدة القياس
+                </label>
+                <input
+                  type="text"
+                  value={prodUnit}
+                  onChange={(e) => setProdUnit(e.target.value)}
+                  placeholder="مثال: نفر / حبة"
+                  className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
+                />
+              </div>
             </div>
 
             <div>
@@ -489,25 +605,13 @@ export const CatalogManagement: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex justify-end gap-2">
-              {editingProd && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditingProd(null);
-                    setProdName('');
-                  }}
-                  className="min-h-[42px] px-4 rounded-xl border border-zinc-200 text-xs font-semibold cursor-pointer"
-                >
-                  إلغاء التعديل
-                </button>
-              )}
+            <div className="flex justify-end">
               <button
                 type="submit"
                 disabled={busy}
-                className="min-h-[42px] px-5 rounded-xl bg-[#D91B23] text-xs font-bold text-white cursor-pointer"
+                className="min-h-[42px] px-5 rounded-xl bg-[#D91B23] hover:bg-[#B9141B] text-xs font-bold text-white cursor-pointer disabled:opacity-50"
               >
-                {editingProd ? 'حفظ تعديلات الصنف' : 'إضافة واعتماد الصنف'}
+                {busy ? 'جاري الحفظ...' : 'إضافة واعتماد الصنف'}
               </button>
             </div>
           </form>
@@ -559,22 +663,18 @@ export const CatalogManagement: React.FC = () => {
                         <div className="flex items-center gap-3 text-xs">
                           <button
                             type="button"
-                            onClick={() => {
-                              setEditingProd(prod);
-                              setProdName(prod.name);
-                              setProdCatId(prod.categoryId);
-                              setProdUnit(prod.unit);
-                              setProdDepts(prod.allowedDepartments);
-                            }}
-                            className="inline-flex items-center gap-1 text-zinc-700 hover:text-zinc-900 font-semibold cursor-pointer"
+                            disabled={busy}
+                            onClick={() => openEditProductModal(prod)}
+                            className="inline-flex items-center gap-1 text-zinc-700 hover:text-zinc-900 font-semibold cursor-pointer disabled:opacity-50"
                           >
                             <Edit3 className="h-3.5 w-3.5" />
                             <span>تعديل</span>
                           </button>
                           <button
                             type="button"
+                            disabled={busy}
                             onClick={() => void handleToggleProduct(prod)}
-                            className={`font-semibold cursor-pointer ${
+                            className={`font-semibold cursor-pointer disabled:opacity-50 ${
                               prod.isActive ? 'text-red-600' : 'text-emerald-600'
                             }`}
                           >
@@ -590,6 +690,160 @@ export const CatalogManagement: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Edit Product Modal */}
+      {editingProd && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[1px] p-4"
+          onClick={() => {
+            if (!busy) setEditingProd(null);
+          }}
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl bg-white border border-zinc-200 shadow-xl p-6 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Edit3 className="h-5 w-5 text-[#D91B23]" />
+                <h3 className="text-base font-bold text-zinc-900 font-display">
+                  تعديل الصنف
+                </h3>
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setEditingProd(null)}
+                aria-label="إغلاق"
+                className="h-8 w-8 rounded-lg inline-flex items-center justify-center text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {editModalError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-700">
+                {editModalError}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveEditedProduct} noValidate className="space-y-4">
+              <div>
+                <label
+                  htmlFor="edit-product-name"
+                  className="block text-xs font-semibold text-zinc-700 mb-1"
+                >
+                  اسم الصنف
+                </label>
+                <input
+                  id="edit-product-name"
+                  ref={editProdInputRef}
+                  type="text"
+                  value={editProdName}
+                  onChange={(e) => setEditProdName(e.target.value)}
+                  placeholder="أدخل اسم الصنف"
+                  className="w-full min-h-[44px] rounded-xl border border-zinc-300 bg-white px-3.5 text-sm font-semibold text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#D91B23]/20 focus:border-[#D91B23]"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label
+                    htmlFor="edit-product-category"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    المجموعة
+                  </label>
+                  <select
+                    id="edit-product-category"
+                    value={editProdCatId}
+                    onChange={(e) => setEditProdCatId(e.target.value)}
+                    className="w-full min-h-[42px] rounded-xl border border-zinc-300 bg-white px-3 text-sm"
+                  >
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-product-unit"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    وحدة القياس
+                  </label>
+                  <input
+                    id="edit-product-unit"
+                    type="text"
+                    value={editProdUnit}
+                    onChange={(e) => setEditProdUnit(e.target.value)}
+                    placeholder="نفر / حبة / صحن"
+                    className="w-full min-h-[42px] rounded-xl border border-zinc-300 bg-white px-3 text-sm"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs font-semibold text-zinc-700 mb-2">
+                  الإدارات المصرح لها بالتعامل مع الصنف:
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {OPERATIONAL_DEPARTMENTS.map((dept) => {
+                    const selected = editProdDepts.includes(dept);
+                    return (
+                      <button
+                        key={dept}
+                        type="button"
+                        onClick={() => toggleEditDept(dept)}
+                        className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold border cursor-pointer ${
+                          selected
+                            ? 'bg-[#D91B23] text-white border-[#D91B23]'
+                            : 'bg-white text-zinc-700 border-zinc-200'
+                        }`}
+                      >
+                        {DEPARTMENT_LABELS[dept]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 py-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editProdIsActive}
+                  onChange={(e) => setEditProdIsActive(e.target.checked)}
+                  className="h-4 w-4 rounded border-zinc-300 text-[#D91B23] focus:ring-[#D91B23]"
+                />
+                <span className="text-xs font-semibold text-zinc-800">
+                  الصنف نشط ومعتمد للاستخدام
+                </span>
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setEditingProd(null)}
+                  className="min-h-[42px] px-4 rounded-xl border border-zinc-200 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="min-h-[42px] px-5 rounded-xl bg-[#D91B23] hover:bg-[#B9141B] text-xs font-bold text-white cursor-pointer disabled:opacity-50"
+                >
+                  {busy ? 'جاري الحفظ...' : 'حفظ التعديلات'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

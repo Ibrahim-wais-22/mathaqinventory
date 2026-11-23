@@ -39,6 +39,7 @@ import { normalizePhoneForPassword, verifyPassword } from '../../utils/passwordC
 import {
   OperationType,
   auth,
+  authPersistenceReady,
   db,
   googleProvider,
   handleFirestoreError,
@@ -48,6 +49,50 @@ import { ensureDailySession, formatActionError } from '../../services/inventory/
 import { ensureInitialSeedData } from '../../services/inventory/seedService';
 
 const LOCK_STORAGE_KEY = 'mathaq_locked_uid';
+const CACHED_PROFILE_PREFIX = 'mathaq_profile_';
+
+function saveCachedPublicProfile(acc: UserAccount): void {
+  try {
+    const publicProfile: UserAccount = {
+      uid: acc.uid,
+      employeeNumber: acc.employeeNumber,
+      username: acc.username,
+      fullName: acc.fullName,
+      email: acc.email,
+      department: acc.department,
+      role: acc.role,
+      branchId: acc.branchId,
+      status: acc.status,
+      permissions: Array.isArray(acc.permissions) ? acc.permissions : [],
+    };
+    window.localStorage.setItem(`${CACHED_PROFILE_PREFIX}${acc.uid}`, JSON.stringify(publicProfile));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadCachedPublicProfile(uid: string): UserAccount | null {
+  try {
+    const raw = window.localStorage.getItem(`${CACHED_PROFILE_PREFIX}${uid}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as UserAccount;
+    if (parsed && parsed.uid === uid && parsed.status) {
+      return parsed;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function clearCachedPublicProfile(uid?: string): void {
+  if (!uid) return;
+  try {
+    window.localStorage.removeItem(`${CACHED_PROFILE_PREFIX}${uid}`);
+  } catch {
+    // ignore
+  }
+}
 
 function getAuthUserEmail(user: User | null | undefined): string {
   if (!user) return '';
@@ -135,78 +180,103 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!credentialLoginInProgressRef.current) {
-        setAuthError(null);
-      }
+    let unsub: (() => void) | undefined;
+    let cancelled = false;
 
-      if (!user) {
-        setFirebaseUser(null);
-        setAccount(null);
-        setIsCredentialUnlocked(false);
-        setCurrentSession(null);
-        setCategories([]);
-        setProducts([]);
-        setAuthLoading(false);
-        return;
-      }
-
-      setFirebaseUser(user);
-      if (!credentialLoginInProgressRef.current) {
-        setAuthLoading(true);
-      }
-
-      try {
-        const resolved = await resolveOrProvisionEmployee(user);
-        setAccount(resolved);
-
-        if (!credentialLoginInProgressRef.current) {
-          const authEmail = getAuthUserEmail(user);
-          const isOwnerEmail =
-            isBootstrapOwnerEmail(authEmail) || isBootstrapOwnerEmail(resolved.email);
-
-          let unlocked = true;
-          if (isOwnerEmail) {
-            try {
-              window.localStorage.removeItem(LOCK_STORAGE_KEY);
-            } catch {
-              // ignore storage errors
-            }
-            unlocked = true;
-          } else {
-            let lockedUid: string | null = null;
-            try {
-              lockedUid = window.localStorage.getItem(LOCK_STORAGE_KEY);
-            } catch {
-              lockedUid = null;
-            }
-            unlocked = lockedUid !== user.uid;
-          }
-
-          setIsCredentialUnlocked(unlocked);
-
-          if (
-            unlocked &&
-            resolved.status === 'active' &&
-            (resolved.role === 'ceo' || resolved.role === 'branch_manager')
-          ) {
-            try {
-              await ensureInitialSeedData(resolved);
-            } catch (seedErr) {
-              console.warn('Initial seed warning:', seedErr);
-            }
-          }
+    const initAuth = async () => {
+      await authPersistenceReady;
+      if (typeof auth.authStateReady === 'function') {
+        try {
+          await auth.authStateReady();
+        } catch {
+          // ignore authStateReady error
         }
-      } catch (err) {
-        setAuthError(formatAuthErrorMessage(err, 'تعذر تحميل بيانات الحساب.'));
-      } finally {
+      }
+      if (cancelled) return;
+
+      unsub = onAuthStateChanged(auth, async (user) => {
+        if (cancelled) return;
         if (!credentialLoginInProgressRef.current) {
+          setAuthError(null);
+        }
+
+        if (!user) {
+          setFirebaseUser(null);
+          setAccount(null);
+          setIsCredentialUnlocked(false);
+          setCurrentSession(null);
+          setCategories([]);
+          setProducts([]);
           setAuthLoading(false);
+          return;
         }
-      }
-    });
 
-    return () => unsub();
+        setFirebaseUser(user);
+        if (!credentialLoginInProgressRef.current) {
+          setAuthLoading(true);
+        }
+
+        try {
+          const resolved = await resolveOrProvisionEmployee(user);
+          if (cancelled) return;
+          saveCachedPublicProfile(resolved);
+          setAccount(resolved);
+
+          if (!credentialLoginInProgressRef.current) {
+            const authEmail = getAuthUserEmail(user);
+            const isOwnerEmail =
+              isBootstrapOwnerEmail(authEmail) || isBootstrapOwnerEmail(resolved.email);
+
+            let unlocked = true;
+            if (isOwnerEmail) {
+              try {
+                window.localStorage.removeItem(LOCK_STORAGE_KEY);
+              } catch {
+                // ignore storage errors
+              }
+              unlocked = true;
+            } else {
+              let lockedUid: string | null = null;
+              try {
+                lockedUid = window.localStorage.getItem(LOCK_STORAGE_KEY);
+              } catch {
+                lockedUid = null;
+              }
+              unlocked = lockedUid !== user.uid;
+            }
+
+            setIsCredentialUnlocked(unlocked);
+
+            if (
+              unlocked &&
+              resolved.status === 'active' &&
+              (resolved.role === 'ceo' || resolved.role === 'branch_manager')
+            ) {
+              try {
+                await ensureInitialSeedData(resolved);
+              } catch (seedErr) {
+                console.warn('Initial seed warning:', seedErr);
+              }
+            }
+          }
+        } catch (err) {
+          if (!cancelled) {
+            setAuthError(formatAuthErrorMessage(err, 'تعذر تحميل بيانات الحساب.'));
+          }
+        } finally {
+          if (!cancelled && !credentialLoginInProgressRef.current) {
+            setAuthLoading(false);
+          }
+        }
+      });
+    };
+
+    void initAuth();
+
+    return () => {
+      cancelled = true;
+      if (unsub) unsub();
+    };
   }, []);
 
   // Subscribe to current user profile live updates (e.g. if admin activates, suspends, or updates credentials)
@@ -218,6 +288,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       (snap) => {
         if (snap.exists()) {
           const nextAcc = { ...(snap.data() as UserAccount), uid: snap.id };
+          saveCachedPublicProfile(nextAcc);
           setAccount(nextAcc);
           if (
             isBootstrapOwnerEmail(getAuthUserEmail(firebaseUser)) ||
@@ -347,9 +418,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // ignore storage errors
     }
     try {
+      await authPersistenceReady;
       const cred = await signInWithPopup(auth, googleProvider);
       if (cred.user) {
         const resolved = await resolveOrProvisionEmployee(cred.user);
+        saveCachedPublicProfile(resolved);
         setFirebaseUser(cred.user);
         setAccount(resolved);
         setIsCredentialUnlocked(true);
@@ -375,6 +448,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setAuthError(null);
     credentialLoginInProgressRef.current = true;
     try {
+      await authPersistenceReady;
       let user = auth.currentUser;
       if (!user || !isBootstrapOwnerEmail(getAuthUserEmail(user))) {
         const cred = await signInWithPopup(auth, googleProvider);
@@ -389,6 +463,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           // ignore storage errors
         }
         const resolved = await resolveOrProvisionEmployee(user);
+        saveCachedPublicProfile(resolved);
         setFirebaseUser(user);
         setAccount(resolved);
         setIsCredentialUnlocked(true);
@@ -443,6 +518,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     credentialLoginInProgressRef.current = true;
     try {
+      await authPersistenceReady;
       let user = auth.currentUser;
       let profile = account;
 
@@ -578,6 +654,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const unlinkGoogleAccount = async () => {
     setAuthError(null);
+    clearCachedPublicProfile(firebaseUser?.uid || account?.uid);
     try {
       window.localStorage.removeItem(LOCK_STORAGE_KEY);
     } catch {
@@ -694,6 +771,10 @@ async function resolveOrProvisionEmployee(user: User): Promise<UserAccount> {
         status: 'active',
         permissions: [...ALL_PERMISSIONS],
       };
+    }
+    const cached = loadCachedPublicProfile(user.uid);
+    if (cached) {
+      return cached;
     }
     throw err;
   }
