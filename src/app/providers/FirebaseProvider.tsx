@@ -143,8 +143,7 @@ interface FirebaseContextValue {
   sessionError: string | null;
   categories: Category[];
   products: Product[];
-  signInWithGoogle: () => Promise<void>;
-  signInOwnerWithGoogle: () => Promise<void>;
+  signInWithGoogle: (hasConsent?: boolean) => Promise<'ok' | 'already_active' | 'error'>;
   signInWithCredentials: (employeeNumber: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   unlinkGoogleAccount: () => Promise<void>;
@@ -211,10 +210,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return;
         }
 
-        setFirebaseUser(user);
-        if (!credentialLoginInProgressRef.current) {
-          setAuthLoading(true);
+        if (credentialLoginInProgressRef.current) {
+          return;
         }
+
+        setFirebaseUser(user);
+        setAuthLoading(true);
 
         try {
           const resolved = await resolveOrProvisionEmployee(user);
@@ -409,54 +410,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const clearAuthError = () => setAuthError(null);
 
-  const signInWithGoogle = async () => {
+  const signInWithGoogle = async (
+    hasConsent = false
+  ): Promise<'ok' | 'already_active' | 'error'> => {
     setAuthError(null);
     credentialLoginInProgressRef.current = true;
-    try {
-      window.localStorage.removeItem(LOCK_STORAGE_KEY);
-    } catch {
-      // ignore storage errors
-    }
     try {
       await authPersistenceReady;
       const cred = await signInWithPopup(auth, googleProvider);
-      if (cred.user) {
-        const resolved = await resolveOrProvisionEmployee(cred.user);
-        saveCachedPublicProfile(resolved);
-        setFirebaseUser(cred.user);
-        setAccount(resolved);
-        setIsCredentialUnlocked(true);
-        if (
-          resolved.status === 'active' &&
-          (resolved.role === 'ceo' || resolved.role === 'branch_manager')
-        ) {
-          try {
-            await ensureInitialSeedData(resolved);
-          } catch (seedErr) {
-            console.warn('Initial seed warning:', seedErr);
-          }
-        }
-      }
-    } catch (err) {
-      setAuthError(formatAuthErrorMessage(err, 'فشل ربط البريد عبر Google.'));
-    } finally {
-      credentialLoginInProgressRef.current = false;
-    }
-  };
+      const user = cred.user;
+      if (!user) return 'error';
 
-  const signInOwnerWithGoogle = async () => {
-    setAuthError(null);
-    credentialLoginInProgressRef.current = true;
-    try {
-      await authPersistenceReady;
-      let user = auth.currentUser;
-      if (!user || !isBootstrapOwnerEmail(getAuthUserEmail(user))) {
-        const cred = await signInWithPopup(auth, googleProvider);
-        user = cred.user;
-      }
-      if (!user) return;
+      const tokenEmail = getAuthUserEmail(user);
+      const isOwner = isBootstrapOwnerEmail(tokenEmail);
 
-      if (isBootstrapOwnerEmail(getAuthUserEmail(user))) {
+      // Owner email enters directly without consent or registration steps
+      if (isOwner) {
         try {
           window.localStorage.removeItem(LOCK_STORAGE_KEY);
         } catch {
@@ -472,35 +441,65 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         } catch (seedErr) {
           console.warn('Initial seed warning:', seedErr);
         }
-        return;
+        return 'ok';
       }
 
-      // Non-owner used direct Google button: check if already registered without creating unconsented pending account
+      // Check if non-owner user already has an active profile before allowing first-time link bypass
       const existingSnap = await getDoc(doc(db, 'users', user.uid));
-      if (existingSnap.exists() && existingSnap.data()?.status === 'active') {
+      if (existingSnap.exists()) {
         const existingProfile = {
           ...(existingSnap.data() as UserAccount),
           uid: existingSnap.id,
         };
-        try {
-          window.localStorage.setItem(LOCK_STORAGE_KEY, user.uid);
-        } catch {
-          // ignore
+        if (existingProfile.status === 'active') {
+          try {
+            window.localStorage.setItem(LOCK_STORAGE_KEY, user.uid);
+          } catch {
+            // ignore
+          }
+          saveCachedPublicProfile(existingProfile);
+          setFirebaseUser(user);
+          setAccount(existingProfile);
+          setIsCredentialUnlocked(false);
+          setAuthError('هذا الحساب مسجل ومفعّل مسبقاً. أدخل الرقم الوظيفي وكلمة المرور للدخول.');
+          return 'already_active';
         }
-        setFirebaseUser(user);
-        setAccount(existingProfile);
-        setIsCredentialUnlocked(false);
-        setAuthError('تم ربط البريد. أدخل الرقم الوظيفي وكلمة المرور للدخول.');
-        return;
       }
 
-      await signOut(auth);
-      setFirebaseUser(null);
-      setAccount(null);
-      setIsCredentialUnlocked(false);
-      setAuthError('هذا الخيار مخصص لحساب المالك فقط. للموظفين يرجى استخدام تبويب "أول مرة".');
+      // New or pending employee must consent to link their email before submitting a join request
+      if (!hasConsent) {
+        await signOut(auth);
+        setFirebaseUser(null);
+        setAccount(null);
+        setIsCredentialUnlocked(false);
+        setAuthError('يرجى الموافقة على ربط البريد الإلكتروني أولاً لإرسال طلب الانضمام.');
+        return 'error';
+      }
+
+      try {
+        window.localStorage.removeItem(LOCK_STORAGE_KEY);
+      } catch {
+        // ignore storage errors
+      }
+      const resolved = await resolveOrProvisionEmployee(user);
+      saveCachedPublicProfile(resolved);
+      setFirebaseUser(user);
+      setAccount(resolved);
+      setIsCredentialUnlocked(true);
+      if (
+        resolved.status === 'active' &&
+        (resolved.role === 'ceo' || resolved.role === 'branch_manager')
+      ) {
+        try {
+          await ensureInitialSeedData(resolved);
+        } catch (seedErr) {
+          console.warn('Initial seed warning:', seedErr);
+        }
+      }
+      return 'ok';
     } catch (err) {
-      setAuthError(formatAuthErrorMessage(err, 'فشل تسجيل الدخول عبر Google.'));
+      setAuthError(formatAuthErrorMessage(err, 'فشل ربط البريد عبر Google.'));
+      return 'error';
     } finally {
       credentialLoginInProgressRef.current = false;
     }
@@ -736,7 +735,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         categories,
         products,
         signInWithGoogle,
-        signInOwnerWithGoogle,
         signInWithCredentials,
         logout,
         unlinkGoogleAccount,

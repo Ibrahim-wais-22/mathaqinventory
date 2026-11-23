@@ -9,7 +9,7 @@ import {
   Unlink,
   UserPlus,
 } from 'lucide-react';
-import { BOOTSTRAP_ADMIN_EMAIL, BRAND_NAME } from '../../constants/departments';
+import { BRAND_NAME } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { BrandLogo } from '../../components/common/BrandLogo';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
@@ -19,7 +19,6 @@ type LoginTab = 'credentials' | 'first_time';
 export const LoginScreen: React.FC = () => {
   const {
     signInWithGoogle,
-    signInOwnerWithGoogle,
     signInWithCredentials,
     unlinkGoogleAccount,
     linkedEmail,
@@ -37,7 +36,6 @@ export const LoginScreen: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
 
   const activeError = localError || authError;
-  const isOwnerLinked = (linkedEmail || '').trim().toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
 
   const handleSwitchTab = (next: LoginTab) => {
     setTab(next);
@@ -67,25 +65,12 @@ export const LoginScreen: React.FC = () => {
     setLocalError(null);
     clearAuthError();
 
-    if (!emailLinkConsent) {
-      setLocalError('يرجى الموافقة على ربط البريد الإلكتروني للمتابعة.');
-      return;
-    }
-
     setSubmitting(true);
     try {
-      await signInWithGoogle();
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleOwnerGoogleSignIn = async () => {
-    setLocalError(null);
-    clearAuthError();
-    setSubmitting(true);
-    try {
-      await signInOwnerWithGoogle();
+      const result = await signInWithGoogle(emailLinkConsent);
+      if (result === 'already_active') {
+        setTab('credentials');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -157,34 +142,7 @@ export const LoginScreen: React.FC = () => {
             </div>
           )}
 
-          {isOwnerLinked ? (
-            <div className="mt-5 space-y-3">
-              <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 flex items-center justify-between gap-2">
-                <div className="min-w-0 flex items-center gap-1.5 text-xs font-medium text-zinc-700">
-                  <Mail className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-                  <span className="truncate">{linkedEmail}</span>
-                </div>
-                <button
-                  type="button"
-                  disabled={isBusy}
-                  onClick={() => void handleUnlink()}
-                  className="shrink-0 inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/60 cursor-pointer disabled:opacity-50"
-                >
-                  <Unlink className="h-3 w-3" />
-                  <span>تغيير</span>
-                </button>
-              </div>
-              <button
-                type="button"
-                disabled={isBusy}
-                onClick={() => void handleOwnerGoogleSignIn()}
-                className="w-full min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-[#D91B23] px-5 py-3 text-sm font-bold text-white hover:bg-[#B9141B] transition-colors cursor-pointer disabled:opacity-60"
-              >
-                <LogIn className="h-4 w-4" />
-                <span>{isBusy ? 'جاري الدخول...' : 'الدخول كمالك التطبيق'}</span>
-              </button>
-            </div>
-          ) : tab === 'credentials' ? (
+          {tab === 'credentials' ? (
             <form onSubmit={handleCredentialSubmit} className="mt-5 space-y-4">
               {linkedEmail && (
                 <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 flex items-center justify-between gap-2">
@@ -259,22 +217,6 @@ export const LoginScreen: React.FC = () => {
               >
                 <LogIn className="h-4 w-4" />
                 <span>{isBusy ? 'جاري الدخول...' : 'تسجيل الدخول'}</span>
-              </button>
-
-              <div className="relative flex items-center py-1">
-                <div className="flex-grow border-t border-zinc-200" />
-                <span className="shrink mx-3 text-[11px] font-semibold text-zinc-400">أو</span>
-                <div className="flex-grow border-t border-zinc-200" />
-              </div>
-
-              <button
-                type="button"
-                disabled={isBusy}
-                onClick={() => void handleOwnerGoogleSignIn()}
-                className="w-full min-h-[44px] flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-2.5 text-xs font-bold text-zinc-800 hover:bg-zinc-100 transition-colors cursor-pointer disabled:opacity-60"
-              >
-                <Mail className="h-4 w-4 text-[#D91B23]" />
-                <span>دخول المالك عبر Google</span>
               </button>
             </form>
           ) : (
