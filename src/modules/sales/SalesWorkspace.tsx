@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   collection,
   doc,
@@ -6,7 +6,7 @@ import {
   query,
   where,
 } from 'firebase/firestore';
-import { Edit3, RefreshCw, Save, Search, Send } from 'lucide-react';
+import { Edit3, FileSpreadsheet, RefreshCw, Save, Search, Send } from 'lucide-react';
 import { REPORT_STATUS_LABELS, VARIANCE_LABELS } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { OperationType, db, handleFirestoreError } from '../../services/firebase/config';
@@ -34,6 +34,11 @@ import {
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { MultiUnitQtyInput } from '../../components/common/MultiUnitQtyInput';
 import { StatusBadge } from '../../components/common/StatusBadge';
+import {
+  SalesExcelImportModal,
+  type ApprovedExcelImportRow,
+} from '../../components/sales/SalesExcelImportModal';
+import { parseWorkbookFile, type ParsedExcelWorkbook } from '../../utils/salesExcelImport';
 
 export const SalesWorkspace: React.FC = () => {
   const {
@@ -63,6 +68,9 @@ export const SalesWorkspace: React.FC = () => {
   const [corrNewVal, setCorrNewVal] = useState('');
   const [corrCounts, setCorrCounts] = useState<Record<string, string>>({});
   const [corrReason, setCorrReason] = useState('');
+  const [excelWorkbook, setExcelWorkbook] = useState<ParsedExcelWorkbook | null>(null);
+  const [excelParsing, setExcelParsing] = useState(false);
+  const excelInputRef = useRef<HTMLInputElement | null>(null);
 
   const canReadResults = hasPermission('view_results');
   const isSessionClosed = currentSession?.status === 'closed';
@@ -289,6 +297,64 @@ export const SalesWorkspace: React.FC = () => {
     }
   };
 
+  const handleExcelFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const lower = file.name.toLowerCase();
+    if (!lower.endsWith('.xlsx') && !lower.endsWith('.xls') && !lower.endsWith('.csv')) {
+      setFeedback({
+        type: 'error',
+        text: 'يرجى اختيار ملف إكسل بصيغة .xlsx أو .xls أو .csv.',
+      });
+      return;
+    }
+
+    setExcelParsing(true);
+    setFeedback(null);
+    try {
+      const parsed = await parseWorkbookFile(file);
+      setExcelWorkbook(parsed);
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: formatActionError(err, 'تعذر قراءة ملف الإكسل. تأكد من سلامة الملف وصيغته.'),
+      });
+    } finally {
+      setExcelParsing(false);
+    }
+  };
+
+  const handleConfirmExcelImport = (rows: ApprovedExcelImportRow[]) => {
+    if (rows.length === 0) {
+      setExcelWorkbook(null);
+      return;
+    }
+
+    setSalesMap((prev) => {
+      const next = { ...prev };
+      for (const row of rows) {
+        next[row.product.id] = String(row.qty);
+      }
+      return next;
+    });
+
+    setSalesCountsMap((prev) => {
+      const next = { ...prev };
+      for (const row of rows) {
+        next[row.product.id] = row.counts;
+      }
+      return next;
+    });
+
+    setExcelWorkbook(null);
+    setFeedback({
+      type: 'success',
+      text: `تم إدخال كميات ${rows.length} صنف من ملف الإكسل في الجدول. راجع الأرقام ثم اضغط حفظ المسودة أو ترحيل التقرير.`,
+    });
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white border border-zinc-200 rounded-2xl p-5">
@@ -403,12 +469,28 @@ export const SalesWorkspace: React.FC = () => {
                 أدخل 0 للأصناف التي لم يُبع منها شيء، واترك غير المدخل فارغاً حتى يكتمل الجرد.
               </span>
               {!isDeptQtyReadOnly && !isSubmitted && !isSessionClosed && (
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    ref={excelInputRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
+                    onChange={(e) => void handleExcelFileChange(e)}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    disabled={busy || excelParsing}
+                    onClick={() => excelInputRef.current?.click()}
+                    className="min-h-[42px] inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <FileSpreadsheet className="h-4 w-4 text-emerald-700" />
+                    <span>{excelParsing ? 'جاري قراءة الملف...' : 'استيراد من إكسل'}</span>
+                  </button>
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => void handleSaveDraft()}
-                    className="min-h-[42px] inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+                    className="min-h-[42px] inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer whitespace-nowrap"
                   >
                     <Save className="h-4 w-4" />
                     <span>حفظ كمسودة</span>
@@ -417,7 +499,7 @@ export const SalesWorkspace: React.FC = () => {
                     type="button"
                     disabled={busy || enteredCount === 0}
                     onClick={() => setConfirmOpen(true)}
-                    className="min-h-[42px] inline-flex items-center gap-2 rounded-xl bg-[#D91B23] px-4 py-2 text-xs font-bold text-white hover:bg-[#B9141B] cursor-pointer disabled:opacity-50"
+                    className="min-h-[42px] inline-flex items-center gap-2 rounded-xl bg-[#D91B23] px-4 py-2 text-xs font-bold text-white hover:bg-[#B9141B] cursor-pointer disabled:opacity-50 whitespace-nowrap"
                   >
                     <Send className="h-4 w-4" />
                     <span>ترحيل تقرير المبيعات</span>
@@ -599,6 +681,15 @@ export const SalesWorkspace: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+      {excelWorkbook && (
+        <SalesExcelImportModal
+          workbook={excelWorkbook}
+          products={approvedProducts}
+          existingSalesMap={salesMap}
+          onConfirm={handleConfirmExcelImport}
+          onClose={() => setExcelWorkbook(null)}
+        />
       )}
     </div>
   );

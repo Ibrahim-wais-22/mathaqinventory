@@ -187,6 +187,7 @@ export const ExecutiveDashboard: React.FC<{
     const totals = results.reduce(
       (acc, r) => {
         acc.factoryReceived += r.factoryReceivedQty;
+        acc.factoryReturned += r.factoryReturnedQty ?? 0;
         acc.indProduction += r.independentProductionQty;
         acc.sales += r.salesQty;
         acc.damaged += r.damagedQty;
@@ -197,6 +198,7 @@ export const ExecutiveDashboard: React.FC<{
       },
       {
         factoryReceived: 0,
+        factoryReturned: 0,
         indProduction: 0,
         sales: 0,
         damaged: 0,
@@ -207,6 +209,7 @@ export const ExecutiveDashboard: React.FC<{
     );
     return {
       factoryReceived: roundQty(totals.factoryReceived),
+      factoryReturned: roundQty(totals.factoryReturned),
       indProduction: roundQty(totals.indProduction),
       sales: roundQty(totals.sales),
       damaged: roundQty(totals.damaged),
@@ -218,7 +221,13 @@ export const ExecutiveDashboard: React.FC<{
 
   const varianceRows = useMemo(() => results.filter((r) => r.variance !== 0), [results]);
   const deliveryVarianceTransfers = useMemo(
-    () => transfers.filter((t) => t.totalVarianceQty !== 0 || t.status === 'discrepancy_logged'),
+    () =>
+      transfers.filter(
+        (t) =>
+          t.transferType !== 'return' &&
+          t.status !== 'returned' &&
+          (t.totalVarianceQty !== 0 || t.status === 'discrepancy_logged')
+      ),
     [transfers]
   );
 
@@ -392,6 +401,11 @@ export const ExecutiveDashboard: React.FC<{
             <div className="mt-2 text-2xl font-extrabold text-zinc-900 tabular-nums font-display">
               {card.value}
             </div>
+            {card.filter === 'factory_transfers' && kpis.factoryReturned > 0 && (
+              <div className="mt-1 text-[11px] text-zinc-500 tabular-nums">
+                بعد خصم {kpis.factoryReturned} مرتجع للمعمل
+              </div>
+            )}
           </button>
         ))}
       </div>

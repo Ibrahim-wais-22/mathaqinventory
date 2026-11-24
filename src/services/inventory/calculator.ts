@@ -9,6 +9,7 @@ export interface ProductInventoryInputs {
   openingBalance: number;
   factorySentQty: number;
   factoryReceivedQty: number;
+  factoryReturnedQty?: number;
   independentProductionQty: number;
   salesQty: number;
   damagedQty: number;
@@ -17,6 +18,7 @@ export interface ProductInventoryInputs {
 }
 
 export interface ProductInventoryCalculation extends ProductInventoryInputs {
+  factoryReturnedQty: number;
   deliveryVarianceQty: number;
   totalProduction: number;
   totalAvailable: number;
@@ -26,30 +28,39 @@ export interface ProductInventoryCalculation extends ProductInventoryInputs {
 
 /**
  * Centralized, deterministic inventory calculation engine.
- * Equations (PRD Section 6):
- * 1. totalProduction = factoryReceivedQty + independentProductionQty
- * 2. totalAvailable = openingBalance + totalProduction
- * 3. variance = totalAvailable - salesQty - damagedQty - validRemainingQty - invalidRemainingQty
+ * Equations (PRD Section 6 + Same-Day Factory Returns):
+ * 1. factorySentQty = max(0, grossFactorySent - factoryReturnedQty)
+ * 2. factoryReceivedQty = max(0, grossFactoryReceived - factoryReturnedQty)
+ * 3. totalProduction = factoryReceivedQty + independentProductionQty
+ * 4. totalAvailable = max(0, openingBalance + totalProduction - max(0, factoryReturnedQty - grossFactoryReceived))
+ * 5. variance = totalAvailable - salesQty - damagedQty - validRemainingQty - invalidRemainingQty
  *    - variance === 0 => matched
  *    - variance > 0   => deficit (عجز)
  *    - variance < 0   => surplus (زيادة)
- * 4. deliveryVarianceQty = factorySentQty - factoryReceivedQty (tracked separately)
+ * 6. deliveryVarianceQty = grossFactorySent - grossFactoryReceived (tracked separately)
  */
 export function calculateProductInventory(
   input: ProductInventoryInputs
 ): ProductInventoryCalculation {
   const openingBalance = safeNum(input.openingBalance);
-  const factorySentQty = safeNum(input.factorySentQty);
-  const factoryReceivedQty = safeNum(input.factoryReceivedQty);
+  const grossFactorySentQty = safeNum(input.factorySentQty);
+  const grossFactoryReceivedQty = safeNum(input.factoryReceivedQty);
+  const factoryReturnedQty = safeNum(input.factoryReturnedQty);
   const independentProductionQty = safeNum(input.independentProductionQty);
   const salesQty = safeNum(input.salesQty);
   const damagedQty = safeNum(input.damagedQty);
   const validRemainingQty = safeNum(input.validRemainingQty);
   const invalidRemainingQty = safeNum(input.invalidRemainingQty);
 
-  const deliveryVarianceQty = roundQty(factorySentQty - factoryReceivedQty);
+  const factorySentQty = Math.max(0, roundQty(grossFactorySentQty - factoryReturnedQty));
+  const factoryReceivedQty = Math.max(0, roundQty(grossFactoryReceivedQty - factoryReturnedQty));
+  const deliveryVarianceQty = roundQty(grossFactorySentQty - grossFactoryReceivedQty);
+  const unabsorbedReturn = Math.max(0, roundQty(factoryReturnedQty - grossFactoryReceivedQty));
   const totalProduction = roundQty(factoryReceivedQty + independentProductionQty);
-  const totalAvailable = roundQty(openingBalance + totalProduction);
+  const totalAvailable = Math.max(
+    0,
+    roundQty(openingBalance + totalProduction - unabsorbedReturn)
+  );
   const variance = roundQty(
     totalAvailable - salesQty - damagedQty - validRemainingQty - invalidRemainingQty
   );
@@ -65,6 +76,7 @@ export function calculateProductInventory(
     openingBalance,
     factorySentQty,
     factoryReceivedQty,
+    factoryReturnedQty,
     deliveryVarianceQty,
     independentProductionQty,
     totalProduction,

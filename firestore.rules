@@ -518,12 +518,13 @@ service cloud.firestore {
     // Factory Transfers + Items Subcollection
     function isValidFactoryTransfer(data) {
       return data.keys().hasAll(['sessionId', 'branchId', 'inventoryDate', 'transferNumber', 'status', 'totalSentQty', 'totalReceivedQty', 'totalVarianceQty', 'createdBy', 'createdByName', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'transferNumber', 'status', 'totalSentQty', 'totalReceivedQty', 'totalVarianceQty', 'factoryNote', 'productionNote', 'createdBy', 'createdByName', 'receivedBy', 'receivedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'transferNumber', 'transferType', 'status', 'totalSentQty', 'totalReceivedQty', 'totalVarianceQty', 'factoryNote', 'productionNote', 'createdBy', 'createdByName', 'receivedBy', 'receivedByName', 'createdAt', 'updatedAt']) &&
         isValidId(data.sessionId) &&
         isValidId(data.branchId) &&
         isValidDateStr(data.inventoryDate) &&
         isNonEmptyString(data.transferNumber, 40) &&
-        data.status in ['pending_receipt', 'received', 'discrepancy_logged'] &&
+        (!('transferType' in data) || data.transferType in ['dispatch', 'return']) &&
+        data.status in ['pending_receipt', 'received', 'discrepancy_logged', 'returned'] &&
         isNonNegNumber(data.totalSentQty) &&
         isNonNegNumber(data.totalReceivedQty) &&
         (data.totalVarianceQty is int || data.totalVarianceQty is float) && data.totalVarianceQty >= -1000000 && data.totalVarianceQty <= 1000000 &&
@@ -560,9 +561,22 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
         sessionIsOpen(incoming().sessionId) &&
         incoming().createdBy == request.auth.uid &&
-        incoming().status == 'pending_receipt' &&
         incoming().createdAt == request.time && incoming().updatedAt == request.time &&
-        (isDept('factory') || isBootstrapAdmin());
+        (isDept('factory') || isBootstrapAdmin()) &&
+        (
+          (
+            incoming().status == 'pending_receipt' &&
+            (!('transferType' in incoming()) || incoming().transferType == 'dispatch')
+          ) ||
+          (
+            'transferType' in incoming() &&
+            incoming().transferType == 'return' &&
+            incoming().status == 'returned' &&
+            incoming().totalVarianceQty == 0 &&
+            incoming().totalReceivedQty == incoming().totalSentQty &&
+            incoming().receivedBy == request.auth.uid
+          )
+        );
       allow update: if isActiveUser() && isValidId(transferId) && isValidFactoryTransfer(incoming()) &&
         incoming().sessionId == existing().sessionId &&
         incoming().createdBy == existing().createdBy &&
@@ -630,7 +644,7 @@ service cloud.firestore {
     // Centralized Computed Product Results
     function isValidProductResult(data) {
       return data.keys().hasAll(['sessionId', 'branchId', 'inventoryDate', 'productId', 'productName', 'categoryId', 'categoryName', 'unit', 'openingBalance', 'factorySentQty', 'factoryReceivedQty', 'deliveryVarianceQty', 'independentProductionQty', 'totalProduction', 'totalAvailable', 'salesQty', 'damagedQty', 'validRemainingQty', 'invalidRemainingQty', 'variance', 'varianceType', 'isFinalized', 'computedBy', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'productId', 'productName', 'categoryId', 'categoryName', 'unit', 'openingBalance', 'factorySentQty', 'factoryReceivedQty', 'deliveryVarianceQty', 'independentProductionQty', 'totalProduction', 'totalAvailable', 'salesQty', 'damagedQty', 'validRemainingQty', 'invalidRemainingQty', 'variance', 'varianceType', 'isFinalized', 'computedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sessionId', 'branchId', 'inventoryDate', 'productId', 'productName', 'categoryId', 'categoryName', 'unit', 'openingBalance', 'factorySentQty', 'factoryReceivedQty', 'factoryReturnedQty', 'deliveryVarianceQty', 'independentProductionQty', 'totalProduction', 'totalAvailable', 'salesQty', 'damagedQty', 'validRemainingQty', 'invalidRemainingQty', 'variance', 'varianceType', 'isFinalized', 'computedBy', 'createdAt', 'updatedAt']) &&
         isValidId(data.sessionId) &&
         isValidId(data.branchId) &&
         isValidDateStr(data.inventoryDate) &&
@@ -642,6 +656,7 @@ service cloud.firestore {
         isNonNegNumber(data.openingBalance) &&
         isNonNegNumber(data.factorySentQty) &&
         isNonNegNumber(data.factoryReceivedQty) &&
+        (!('factoryReturnedQty' in data) || isNonNegNumber(data.factoryReturnedQty)) &&
         (data.deliveryVarianceQty is int || data.deliveryVarianceQty is float) &&
         isNonNegNumber(data.independentProductionQty) &&
         isNonNegNumber(data.totalProduction) &&

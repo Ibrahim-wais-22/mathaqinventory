@@ -10,6 +10,7 @@ import {
   buildReportTable,
   exportReportToExcel,
 } from '../../services/reports/reportEngine';
+import { recalculateSessionResults } from '../../services/inventory/firestoreService';
 import type {
   DailySession,
   DepartmentReport,
@@ -172,6 +173,27 @@ export const ReportsHub: React.FC<{ initialReportId?: string }> = ({ initialRepo
     canViewProductionEntries,
     fromDate,
     toDate,
+  ]);
+
+  // Keep open/reopened sessions' central results numerically updated when viewing reports
+  useEffect(() => {
+    if (!account || !isAdmin || products.length === 0 || categories.length === 0) return;
+    const openSessions = sessions.filter((s) => s.status !== 'closed');
+    if (openSessions.length === 0) return;
+    const timer = setTimeout(() => {
+      openSessions.forEach((sess) => {
+        void recalculateSessionResults(account, sess, products, categories);
+      });
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [
+    account?.uid,
+    isAdmin,
+    sessions,
+    transfers.length,
+    deptReports.length,
+    products.length,
+    categories.length,
   ]);
 
   const categoryMap = useMemo(() => new Map(categories.map((c) => [c.id, c.name])), [categories]);

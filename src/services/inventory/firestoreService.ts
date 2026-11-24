@@ -12,6 +12,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import {
+  BOOTSTRAP_ADMIN_EMAIL,
   DEFAULT_BRANCH_ID,
   getDepartmentForRole,
   getDefaultPermissionsForRole,
@@ -44,8 +45,10 @@ import {
 } from '../../utils/passwordCrypto';
 import {
   buildNormalizedProductUnits,
+  decomposeTotalToUnitCounts,
   formatBreakdownText,
   formatUnitsSummary,
+  getEffectiveProductUnits,
   sanitizeUnitBreakdown,
 } from '../../utils/productUnits';
 import { OperationType, db, handleFirestoreError } from '../firebase/config';
@@ -1058,6 +1061,7 @@ export async function createFactoryTransfer(
     branchId: session.branchId,
     inventoryDate: session.inventoryDate,
     transferNumber,
+    transferType: 'dispatch',
     status: 'pending_receipt',
     totalSentQty,
     totalReceivedQty: 0,
@@ -1101,6 +1105,198 @@ export async function createFactoryTransfer(
       department: 'factory',
       newValueSummary: `توريد ${transferNumber} بإجمالي ${totalSentQty} وحدة`,
     });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `factoryTransfers/${transferId}`);
+  }
+}
+
+export async function createFactoryReturn(
+  actor: UserAccount,
+  session: DailySession,
+  items: Array<{ product: Product; returnedQty: number; returnedBreakdown?: UnitBreakdown; note?: string }>,
+  returnNote: string,
+  products?: Product[],
+  categories?: Category[]
+): Promise<void> {
+  for (const i of items) {
+    if (Number.isNaN(i.returnedQty) || i.returnedQty < 0) {
+      throw new Error(`الكمية المرتجعة للصنف "${i.product.name}" غير صالحة.`);
+    }
+  }
+  const validItems = items.filter((i) => i.returnedQty > 0);
+  if (validItems.length === 0) {
+    throw new Error('لا يمكن تسجيل مرتجع فارغ. أدخل كمية أكبر من صفر لصنف واحد على الأقل.');
+  }
+
+  // Verify against same-day transferred quantities so returns never exceed what was transferred today
+  const existingTransfersSnap = await getDocs(
+    query(collection(db, 'factoryTransfers'), where('sessionId', '==', session.id))
+  );
+  const grossSentMap = new Map<string, number>();
+  const alreadyReturnedMap = new Map<string, number>();
+
+  for (const trfDoc of existingTransfersSnap.docs) {
+    const trf = trfDoc.data() as FactoryTransfer;
+    const trfItemsSnap = await getDocs(collection(db, 'factoryTransfers', trfDoc.id, 'items'));
+    trfItemsSnap.forEach((d) => {
+      const it = d.data() as FactoryTransferItem;
+      if (trf.transferType === 'return' || trf.status === 'returned') {
+        alreadyReturnedMap.set(
+          it.productId,
+          roundQty((alreadyReturnedMap.get(it.productId) || 0) + safeNum(it.sentQty))
+        );
+      } else {
+        grossSentMap.set(
+          it.productId,
+          roundQty((grossSentMap.get(it.productId) || 0) + safeNum(it.sentQty))
+        );
+      }
+    });
+  }
+
+  for (const item of validItems) {
+    const dispatched = grossSentMap.get(item.product.id) || 0;
+    const prevReturned = alreadyReturnedMap.get(item.product.id) || 0;
+    const availableToReturn = Math.max(0, roundQty(dispatched - prevReturned));
+    if (item.returnedQty > availableToReturn + 0.0001) {
+      throw new Error(
+        `الكمية المرتجعة للصنف "${item.product.name}" (${item.returnedQty}) تتجاوز الكمية المرحلة المتاحة اليوم (${availableToReturn}).`
+      );
+    }
+  }
+
+  const transferId = makeUniqueId('ret');
+  const transferNumber = `RET-${session.inventoryDate.replace(/-/g, '')}-${String(Date.now()).slice(-4)}`;
+  const totalReturnedQty = roundQty(validItems.reduce((acc, i) => acc + safeNum(i.returnedQty), 0));
+  const actorName = (actor.fullName || actor.username || 'موظف المعمل').trim().slice(0, 120);
+
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'factoryTransfers', transferId), {
+    sessionId: session.id,
+    branchId: session.branchId,
+    inventoryDate: session.inventoryDate,
+    transferNumber,
+    transferType: 'return',
+    status: 'returned',
+    totalSentQty: totalReturnedQty,
+    totalReceivedQty: totalReturnedQty,
+    totalVarianceQty: 0,
+    factoryNote: returnNote.trim().slice(0, 400),
+    productionNote: 'مرتجع مسحوب تلقائياً من كميات اليوم إلى المعمل',
+    createdBy: actor.uid,
+    createdByName: actorName,
+    receivedBy: actor.uid,
+    receivedByName: actorName,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  for (const item of validItems) {
+    const cleanBreakdown = sanitizeUnitBreakdown(item.returnedBreakdown);
+    const cleanQty = safeNum(item.returnedQty);
+    batch.set(doc(db, 'factoryTransfers', transferId, 'items', item.product.id), {
+      transferId,
+      sessionId: session.id,
+      productId: item.product.id,
+      productName: item.product.name.slice(0, 140),
+      unit: item.product.unit.slice(0, 40),
+      sentQty: cleanQty,
+      receivedQty: cleanQty,
+      varianceQty: 0,
+      sentBreakdown: cleanBreakdown ?? null,
+      receivedBreakdown: cleanBreakdown ?? null,
+      note: (item.note || returnNote || 'مرتجع من الإنتاج إلى المعمل').slice(0, 300),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  // Also deduct returned quantities from Factory's prepared report items if editable by this actor
+  const factoryReportId = sanitizeId(`${session.id}_factory`);
+  const isActorAdmin =
+    actor.role === 'ceo' ||
+    actor.role === 'branch_manager' ||
+    actor.email.toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
+
+  try {
+    const repSnap = await getDoc(doc(db, 'departmentReports', factoryReportId));
+    if (repSnap.exists()) {
+      const repData = repSnap.data() as DepartmentReport;
+      const canEditReportItems =
+        (repData.status === 'draft' && (actor.department === 'factory' || isActorAdmin)) ||
+        (repData.status !== 'draft' && isActorAdmin);
+
+      if (canEditReportItems) {
+        const repItemsSnap = await getDocs(
+          collection(db, 'departmentReports', factoryReportId, 'items')
+        );
+        const repItemByProductId = new Map<string, DepartmentReportItem>();
+        repItemsSnap.forEach((d) => {
+          repItemByProductId.set(d.id, d.data() as DepartmentReportItem);
+        });
+
+        for (const item of validItems) {
+          const existingItem = repItemByProductId.get(item.product.id);
+          if (
+            existingItem &&
+            existingItem.preparedQty !== null &&
+            existingItem.preparedQty !== undefined
+          ) {
+            const nextPrepared = Math.max(
+              0,
+              roundQty(safeNum(existingItem.preparedQty) - safeNum(item.returnedQty))
+            );
+            const effUnits = getEffectiveProductUnits(item.product);
+            const nextCounts = decomposeTotalToUnitCounts(nextPrepared, effUnits);
+            const nextBreakdown: UnitBreakdown = {};
+            for (const u of effUnits) {
+              const cnt = Number(nextCounts[u.name] || 0);
+              if (cnt > 0) nextBreakdown[u.name] = roundQty(cnt);
+            }
+            const nextUnitBreakdowns = {
+              ...(existingItem.unitBreakdowns || {}),
+              ...(Object.keys(nextBreakdown).length > 0 ? { preparedQty: nextBreakdown } : {}),
+            };
+            if (Object.keys(nextBreakdown).length === 0) {
+              delete nextUnitBreakdowns.preparedQty;
+            }
+
+            batch.update(doc(db, 'departmentReports', factoryReportId, 'items', item.product.id), {
+              preparedQty: nextPrepared,
+              unitBreakdowns:
+                Object.keys(nextUnitBreakdowns).length > 0 ? nextUnitBreakdowns : null,
+              updatedBy: actor.uid,
+              updatedByName: actorName,
+              updatedAt: serverTimestamp(),
+            });
+          }
+        }
+      }
+    }
+  } catch (repErr) {
+    console.warn('Skipped prepared report sync during return:', repErr);
+  }
+
+  try {
+    await batch.commit();
+    await appendAuditLog({
+      actor,
+      action: 'سحب_مرتجع_من_الإنتاج_للمعمل',
+      targetCollection: 'factoryTransfers',
+      targetId: transferId,
+      sessionId: session.id,
+      inventoryDate: session.inventoryDate,
+      branchId: session.branchId,
+      department: 'factory',
+      newValueSummary: `مرتجع ${transferNumber} بإجمالي ${totalReturnedQty} وحدة (${validItems
+        .map((i) => `${i.product.name}: ${i.returnedQty}`)
+        .join('، ')})`,
+      reason: returnNote,
+    });
+
+    if (isActorAdmin && products && categories && products.length > 0 && categories.length > 0) {
+      await recalculateSessionResults(actor, session, products, categories);
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `factoryTransfers/${transferId}`);
   }
@@ -1254,9 +1450,10 @@ export async function recalculateSessionResults(
       });
     }
 
-    // 2. Factory transfers for this session
+    // 2. Factory transfers & same-day returns for this session
     const factorySentMap = new Map<string, number>();
     const factoryReceivedMap = new Map<string, number>();
+    const factoryReturnedMap = new Map<string, number>();
 
     const transfersSnap = await getDocs(
       query(collection(db, 'factoryTransfers'), where('sessionId', '==', session.id))
@@ -1264,16 +1461,24 @@ export async function recalculateSessionResults(
     for (const trfDoc of transfersSnap.docs) {
       const trf = trfDoc.data() as FactoryTransfer;
       const itemsSnap = await getDocs(collection(db, 'factoryTransfers', trfDoc.id, 'items'));
+      const isReturn = trf.transferType === 'return' || trf.status === 'returned';
       itemsSnap.forEach((itemDoc) => {
         const item = itemDoc.data() as FactoryTransferItem;
+        if (isReturn) {
+          factoryReturnedMap.set(
+            item.productId,
+            roundQty((factoryReturnedMap.get(item.productId) || 0) + safeNum(item.sentQty))
+          );
+          return;
+        }
         factorySentMap.set(
           item.productId,
-          (factorySentMap.get(item.productId) || 0) + safeNum(item.sentQty)
+          roundQty((factorySentMap.get(item.productId) || 0) + safeNum(item.sentQty))
         );
         if (trf.status !== 'pending_receipt' && item.receivedQty !== null && item.receivedQty !== undefined) {
           factoryReceivedMap.set(
             item.productId,
-            (factoryReceivedMap.get(item.productId) || 0) + safeNum(item.receivedQty)
+            roundQty((factoryReceivedMap.get(item.productId) || 0) + safeNum(item.receivedQty))
           );
         }
       });
@@ -1342,6 +1547,7 @@ export async function recalculateSessionResults(
         openingBalance: openingMap.get(prod.id) || 0,
         factorySentQty: factorySentMap.get(prod.id) || 0,
         factoryReceivedQty: factoryReceivedMap.get(prod.id) || 0,
+        factoryReturnedQty: factoryReturnedMap.get(prod.id) || 0,
         independentProductionQty: indProdMap.get(prod.id) || 0,
         salesQty: salesMap.get(prod.id) || 0,
         damagedQty: damagedMap.get(prod.id) || 0,

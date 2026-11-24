@@ -440,16 +440,25 @@ export const ProductionWorkspace: React.FC = () => {
         indTotals.set(entry.productId, (indTotals.get(entry.productId) || 0) + Number(entry.qty || 0));
       });
 
-      // Collect products that had received factory transfers as well
+      // Collect net received factory transfers (dispatches minus same-day returns)
       const receivedTotals = new Map<string, number>();
       for (const trf of transfers) {
+        const isReturn = trf.transferType === 'return' || trf.status === 'returned';
         const itemsSnap = await getDocs(collection(db, 'factoryTransfers', trf.id, 'items'));
         itemsSnap.forEach((d) => {
           const item = d.data() as FactoryTransferItem;
-          receivedTotals.set(
-            item.productId,
-            (receivedTotals.get(item.productId) || 0) + Number(item.receivedQty ?? 0)
-          );
+          const cur = receivedTotals.get(item.productId) || 0;
+          if (isReturn) {
+            receivedTotals.set(
+              item.productId,
+              Math.max(0, roundQty(cur - Number(item.sentQty ?? 0)))
+            );
+          } else {
+            receivedTotals.set(
+              item.productId,
+              roundQty(cur + Number(item.receivedQty ?? 0))
+            );
+          }
         });
       }
 
@@ -692,41 +701,58 @@ export const ProductionWorkspace: React.FC = () => {
               </div>
             ) : (
               <div className="divide-y divide-zinc-100">
-                {transfers.map((trf) => (
-                  <button
-                    key={trf.id}
-                    type="button"
-                    onClick={() => void openTransferDetail(trf)}
-                    className={`w-full text-right p-4 hover:bg-zinc-50 transition-colors cursor-pointer ${
-                      selectedTransfer?.id === trf.id ? 'bg-red-50/40' : ''
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono text-xs font-bold text-zinc-900">
-                        {trf.transferNumber}
-                      </span>
-                      <StatusBadge
-                        label={TRANSFER_STATUS_LABELS[trf.status]}
-                        tone={
-                          trf.status === 'pending_receipt'
-                            ? 'warning'
-                            : trf.status === 'received'
-                            ? 'success'
-                            : 'danger'
-                        }
-                      />
-                    </div>
-                    <div className="mt-2 flex items-center justify-between text-xs text-zinc-600 tabular-nums">
-                      <span>مرسل من المعمل: {trf.totalSentQty}</span>
-                      <span>
-                        مستلم: {trf.status === 'pending_receipt' ? 'بانتظار التأكيد' : trf.totalReceivedQty}
-                      </span>
-                    </div>
-                    <div className="mt-1 text-[11px] text-zinc-400">
-                      بواسطة: {trf.createdByName} · {formatTimestampAden(trf.createdAt)}
-                    </div>
-                  </button>
-                ))}
+                {transfers.map((trf) => {
+                  const isReturn = trf.transferType === 'return' || trf.status === 'returned';
+                  return (
+                    <button
+                      key={trf.id}
+                      type="button"
+                      onClick={() => void openTransferDetail(trf)}
+                      className={`w-full text-right p-4 hover:bg-zinc-50 transition-colors cursor-pointer ${
+                        selectedTransfer?.id === trf.id ? 'bg-red-50/40' : ''
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-xs font-bold text-zinc-900">
+                          {trf.transferNumber}
+                        </span>
+                        <StatusBadge
+                          label={TRANSFER_STATUS_LABELS[trf.status]}
+                          tone={
+                            trf.status === 'pending_receipt' || trf.status === 'returned'
+                              ? 'warning'
+                              : trf.status === 'received'
+                              ? 'success'
+                              : 'danger'
+                          }
+                        />
+                      </div>
+                      <div className="mt-2 flex items-center justify-between text-xs text-zinc-600 tabular-nums">
+                        {isReturn ? (
+                          <>
+                            <span className="text-amber-800 font-semibold">
+                              مرتجع مسحوب للمعمل: {trf.totalSentQty}
+                            </span>
+                            <span className="text-zinc-500">خُصم من اليوم</span>
+                          </>
+                        ) : (
+                          <>
+                            <span>مرسل من المعمل: {trf.totalSentQty}</span>
+                            <span>
+                              مستلم:{' '}
+                              {trf.status === 'pending_receipt'
+                                ? 'بانتظار التأكيد'
+                                : trf.totalReceivedQty}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <div className="mt-1 text-[11px] text-zinc-400">
+                        بواسطة: {trf.createdByName} · {formatTimestampAden(trf.createdAt)}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -741,17 +767,23 @@ export const ProductionWorkspace: React.FC = () => {
                 <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
                   <div>
                     <h3 className="text-base font-bold text-zinc-900 font-display">
-                      مراجعة التوريد {selectedTransfer.transferNumber}
+                      {selectedTransfer.transferType === 'return' ||
+                      selectedTransfer.status === 'returned'
+                        ? `تفاصيل مرتجع ${selectedTransfer.transferNumber}`
+                        : `مراجعة التوريد ${selectedTransfer.transferNumber}`}
                     </h3>
                     <p className="text-xs text-zinc-500">
-                      الكمية المرسلة من المعمل ثابتة ولا يمكن تعديلها؛ أدخل الكمية المستلمة فعلياً
-                      فقط
+                      {selectedTransfer.transferType === 'return' ||
+                      selectedTransfer.status === 'returned'
+                        ? 'تم سحب هذه الكميات المرتجعة إلى المعمل وإنقاصها تلقائياً من كميات اليوم'
+                        : 'الكمية المرسلة من المعمل ثابتة ولا يمكن تعديلها؛ أدخل الكمية المستلمة فعلياً فقط'}
                     </p>
                   </div>
                   <StatusBadge
                     label={TRANSFER_STATUS_LABELS[selectedTransfer.status]}
                     tone={
-                      selectedTransfer.status === 'pending_receipt'
+                      selectedTransfer.status === 'pending_receipt' ||
+                      selectedTransfer.status === 'returned'
                         ? 'warning'
                         : selectedTransfer.status === 'received'
                         ? 'success'

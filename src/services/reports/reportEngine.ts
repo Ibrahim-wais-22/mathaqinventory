@@ -123,7 +123,8 @@ export function buildReportTable(params: {
           'المجموعة',
           'الوحدة',
           'أول اليوم',
-          'توريد المعمل',
+          'توريد المعمل (صافي)',
+          'مرتجع للمعمل',
           'إنتاج مستقل',
           'إجمالي المتاح',
           'المبيعات',
@@ -140,6 +141,7 @@ export function buildReportTable(params: {
           r.unit,
           r.openingBalance,
           r.factoryReceivedQty,
+          r.factoryReturnedQty ?? 0,
           r.independentProductionQty,
           r.totalAvailable,
           r.salesQty,
@@ -175,6 +177,7 @@ export function buildReportTable(params: {
           categoryName: string;
           unit: string;
           received: number;
+          returned: number;
           ind: number;
           sales: number;
           damaged: number;
@@ -189,6 +192,7 @@ export function buildReportTable(params: {
           categoryName: r.categoryName,
           unit: r.unit,
           received: 0,
+          returned: 0,
           ind: 0,
           sales: 0,
           damaged: 0,
@@ -197,6 +201,7 @@ export function buildReportTable(params: {
           netVariance: 0,
         };
         cur.received = roundQty(cur.received + r.factoryReceivedQty);
+        cur.returned = roundQty(cur.returned + (r.factoryReturnedQty ?? 0));
         cur.ind = roundQty(cur.ind + r.independentProductionQty);
         cur.sales = roundQty(cur.sales + r.salesQty);
         cur.damaged = roundQty(cur.damaged + r.damagedQty);
@@ -206,12 +211,13 @@ export function buildReportTable(params: {
         grouped.set(r.productId, cur);
       }
       return {
-        columns: ['الصنف', 'المجموعة', 'الوحدة', 'وارد المعمل', 'إنتاج مستقل', 'المبيعات', 'التالف', 'صالح', 'غير صالح', 'صافي الفرق'],
+        columns: ['الصنف', 'المجموعة', 'الوحدة', 'وارد المعمل (صافي)', 'مرتجع للمعمل', 'إنتاج مستقل', 'المبيعات', 'التالف', 'صالح', 'غير صالح', 'صافي الفرق'],
         rows: Array.from(grouped.values()).map((g) => [
           g.name,
           g.categoryName,
           g.unit,
           g.received,
+          g.returned,
           g.ind,
           g.sales,
           g.damaged,
@@ -224,21 +230,30 @@ export function buildReportTable(params: {
 
     case 'factory_transfers':
       return {
-        columns: ['رقم التوريد', 'تاريخ الجرد', 'مرسل المعمل', 'الكمية المرسلة', 'الكمية المستلمة', 'فرق التسليم', 'الحالة', 'المستلم'],
-        rows: transfers.map((t) => [
-          t.transferNumber,
-          t.inventoryDate,
-          t.createdByName,
-          t.totalSentQty,
-          t.totalReceivedQty,
-          t.totalVarianceQty,
-          TRANSFER_STATUS_LABELS[t.status],
-          t.receivedByName || '—',
-        ]),
+        columns: ['رقم الحركة', 'نوع الحركة', 'تاريخ الجرد', 'المسؤول', 'الكمية المرسلة / المرتجعة', 'الكمية المستلمة', 'فرق التسليم', 'الحالة', 'المستلم'],
+        rows: transfers.map((t) => {
+          const isReturn = t.transferType === 'return' || t.status === 'returned';
+          return [
+            t.transferNumber,
+            isReturn ? 'مرتجع من الإنتاج للمعمل' : 'توريد من المعمل للإنتاج',
+            t.inventoryDate,
+            t.createdByName,
+            isReturn ? -t.totalSentQty : t.totalSentQty,
+            isReturn ? -t.totalReceivedQty : t.totalReceivedQty,
+            t.totalVarianceQty,
+            TRANSFER_STATUS_LABELS[t.status],
+            t.receivedByName || '—',
+          ];
+        }),
       };
 
     case 'delivery_discrepancies': {
-      const withDiff = transfers.filter((t) => t.totalVarianceQty !== 0 || t.status === 'discrepancy_logged');
+      const withDiff = transfers.filter(
+        (t) =>
+          t.transferType !== 'return' &&
+          t.status !== 'returned' &&
+          (t.totalVarianceQty !== 0 || t.status === 'discrepancy_logged')
+      );
       return {
         columns: ['رقم التوريد', 'التاريخ', 'المرسل', 'المستلم', 'المُرسل (معمل)', 'المُستلم (إنتاج)', 'فرق التسليم', 'ملاحظة الإنتاج'],
         rows: withDiff.map((t) => [

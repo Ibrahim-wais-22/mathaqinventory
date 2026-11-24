@@ -13,6 +13,7 @@ import {
   PackagePlus,
   Plus,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   Send,
@@ -26,6 +27,7 @@ import {
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { OperationType, db, handleFirestoreError } from '../../services/firebase/config';
 import {
+  createFactoryReturn,
   createFactoryTransfer,
   ensureDepartmentReport,
   formatActionError,
@@ -73,15 +75,24 @@ export const FactoryWorkspace: React.FC = () => {
   const [transferQtyMap, setTransferQtyMap] = useState<Record<string, string>>({});
   const [transferCountsMap, setTransferCountsMap] = useState<Record<string, Record<string, string>>>({});
   const [transferNote, setTransferNote] = useState('');
+  const [returnQtyMap, setReturnQtyMap] = useState<Record<string, string>>({});
+  const [returnCountsMap, setReturnCountsMap] = useState<Record<string, Record<string, string>>>({});
+  const [returnNote, setReturnNote] = useState('');
   const [transfers, setTransfers] = useState<FactoryTransfer[]>([]);
+  const [todayMovement, setTodayMovement] = useState<{
+    sent: Record<string, number>;
+    returned: Record<string, number>;
+    net: Record<string, number>;
+  }>({ sent: {}, returned: {}, net: {} });
   const [proposedProducts, setProposedProducts] = useState<Product[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
-  const [activeSubTab, setActiveSubTab] = useState<'dispatch' | 'prepared' | 'proposals'>('dispatch');
+  const [activeSubTab, setActiveSubTab] = useState<'dispatch' | 'returns' | 'prepared' | 'proposals'>('dispatch');
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [confirmSubmitOpen, setConfirmSubmitOpen] = useState(false);
   const [confirmTransferOpen, setConfirmTransferOpen] = useState(false);
+  const [confirmReturnOpen, setConfirmReturnOpen] = useState(false);
 
   // Propose new product modal state
   const [newProdModal, setNewProdModal] = useState(false);
@@ -199,6 +210,62 @@ export const FactoryWorkspace: React.FC = () => {
     };
   }, [account?.uid, currentSession?.id]);
 
+  // Compute same-day sent, returned, and net transferred quantities per product
+  useEffect(() => {
+    if (transfers.length === 0) {
+      setTodayMovement({ sent: {}, returned: {}, net: {} });
+      return;
+    }
+    let active = true;
+    Promise.all(
+      transfers.map(async (trf) => {
+        const snap = await getDocs(collection(db, 'factoryTransfers', trf.id, 'items'));
+        return { trf, snap };
+      })
+    )
+      .then((results) => {
+        if (!active) return;
+        const sent: Record<string, number> = {};
+        const returned: Record<string, number> = {};
+        const net: Record<string, number> = {};
+        for (const { trf, snap } of results) {
+          const isReturn = trf.transferType === 'return' || trf.status === 'returned';
+          snap.forEach((d) => {
+            const data = d.data() as { productId?: string; sentQty?: number };
+            if (!data.productId) return;
+            const q = roundQty(Number(data.sentQty || 0));
+            if (isReturn) {
+              returned[data.productId] = roundQty((returned[data.productId] || 0) + q);
+            } else {
+              sent[data.productId] = roundQty((sent[data.productId] || 0) + q);
+            }
+          });
+        }
+        const allIds = new Set([...Object.keys(sent), ...Object.keys(returned)]);
+        allIds.forEach((pid) => {
+          net[pid] = Math.max(0, roundQty((sent[pid] || 0) - (returned[pid] || 0)));
+        });
+        setTodayMovement({ sent, returned, net });
+      })
+      .catch((err) => {
+        console.warn('Could not load transfer item totals:', err);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [transfers]);
+
+  const dispatchTransfers = useMemo(
+    () => transfers.filter((t) => t.transferType !== 'return' && t.status !== 'returned'),
+    [transfers]
+  );
+
+  const returnTransfers = useMemo(
+    () => transfers.filter((t) => t.transferType === 'return' || t.status === 'returned'),
+    [transfers]
+  );
+
   const filteredProducts = useMemo(() => {
     return approvedProducts.filter((p) => {
       const matchesCat = selectedCategory === 'all' || p.categoryId === selectedCategory;
@@ -304,7 +371,7 @@ export const FactoryWorkspace: React.FC = () => {
   };
 
   const handleFillPreparedFromTransfers = async () => {
-    if (transfers.length === 0) {
+    if (dispatchTransfers.length === 0) {
       setFeedback({ type: 'error', text: 'لا توجد توريدات مرسلة اليوم للنسخ منها.' });
       return;
     }
@@ -314,6 +381,7 @@ export const FactoryWorkspace: React.FC = () => {
       const summed = new Map<string, number>();
       const summedBreakdowns = new Map<string, UnitBreakdown>();
       for (const trf of transfers) {
+        const isReturn = trf.transferType === 'return' || trf.status === 'returned';
         const itemsSnap = await getDocs(collection(db, 'factoryTransfers', trf.id, 'items'));
         itemsSnap.forEach((d) => {
           const data = d.data() as {
@@ -322,15 +390,20 @@ export const FactoryWorkspace: React.FC = () => {
             sentBreakdown?: UnitBreakdown | null;
           };
           if (data.productId) {
+            const qtyDelta = Number(data.sentQty || 0);
+            const curTotal = summed.get(data.productId) || 0;
             summed.set(
               data.productId,
-              roundQty((summed.get(data.productId) || 0) + Number(data.sentQty || 0))
+              Math.max(0, roundQty(isReturn ? curTotal - qtyDelta : curTotal + qtyDelta))
             );
             if (data.sentBreakdown) {
               const curBd = summedBreakdowns.get(data.productId) || {};
               for (const [uName, uQty] of Object.entries(data.sentBreakdown)) {
                 if (typeof uQty === 'number' && uQty > 0) {
-                  curBd[uName] = roundQty((curBd[uName] || 0) + uQty);
+                  const prev = curBd[uName] || 0;
+                  const nextU = Math.max(0, roundQty(isReturn ? prev - uQty : prev + uQty));
+                  if (nextU > 0) curBd[uName] = nextU;
+                  else delete curBd[uName];
                 }
               }
               summedBreakdowns.set(data.productId, curBd);
@@ -361,7 +434,7 @@ export const FactoryWorkspace: React.FC = () => {
       });
       setFeedback({
         type: 'success',
-        text: 'تم تعبئة الكميات المجهزة من إجمالي التوريدات المرسلة اليوم. يمكنك مراجعتها ثم الترحيل.',
+        text: 'تم تعبئة الكميات المجهزة من صافي التوريدات المرسلة اليوم بعد خصم أي مرتجعات.',
       });
     } catch (err) {
       setFeedback({
@@ -430,6 +503,79 @@ export const FactoryWorkspace: React.FC = () => {
       setFeedback({
         type: 'error',
         text: formatActionError(err, 'تعذر إرسال التوريد.'),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCreateReturn = async () => {
+    if (!account || !currentSession) {
+      setConfirmReturnOpen(false);
+      setFeedback({
+        type: 'error',
+        text: sessionError || 'جلسة الجرد اليومية غير متاحة حالياً. يرجى تحديث الصفحة.',
+      });
+      return;
+    }
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const items = approvedProducts
+        .map((p) => {
+          const units = getEffectiveProductUnits(p);
+          const counts = returnCountsMap[p.id];
+          let qty = 0;
+          let returnedBreakdown: UnitBreakdown | undefined;
+
+          if (counts && Object.keys(counts).length > 0) {
+            const summed = sumUnitCounts(units, counts);
+            if (summed.hasInvalid) {
+              throw new Error(`الكمية المرتجعة للصنف "${p.name}" غير صالحة.`);
+            }
+            qty = summed.total ?? 0;
+            returnedBreakdown = summed.breakdown;
+          } else {
+            const raw = returnQtyMap[p.id];
+            if (raw !== undefined && raw !== '') {
+              qty = Number(raw);
+              if (Number.isNaN(qty) || qty < 0) {
+                throw new Error(`الكمية المرتجعة للصنف "${p.name}" غير صالحة.`);
+              }
+            }
+          }
+
+          return {
+            product: p,
+            returnedQty: roundQty(qty),
+            returnedBreakdown,
+          };
+        })
+        .filter((i) => i.returnedQty > 0);
+
+      for (const item of items) {
+        const avail = todayMovement.net[item.product.id] || 0;
+        if (item.returnedQty > avail + 0.0001) {
+          throw new Error(
+            `الكمية المرتجعة للصنف "${item.product.name}" (${item.returnedQty}) تتجاوز الكمية المرحلة المتاحة اليوم (${avail}).`
+          );
+        }
+      }
+
+      await createFactoryReturn(account, currentSession, items, returnNote, products, categories);
+      setReturnQtyMap({});
+      setReturnCountsMap({});
+      setReturnNote('');
+      setConfirmReturnOpen(false);
+      setFeedback({
+        type: 'success',
+        text: 'تم تسجيل وسحب الكميات المرتجعة من الإنتاج إلى المعمل وتحديث أرقام اليوم والتقارير بنجاح.',
+      });
+    } catch (err) {
+      setConfirmReturnOpen(false);
+      setFeedback({
+        type: 'error',
+        text: formatActionError(err, 'تعذر تسجيل المرتجع.'),
       });
     } finally {
       setBusy(false);
@@ -510,6 +656,9 @@ export const FactoryWorkspace: React.FC = () => {
   const totalDispatchUnits = roundQty(
     Object.values(transferQtyMap).reduce((sum, v) => sum + (Number(v) > 0 ? Number(v) : 0), 0)
   );
+  const totalReturnUnits = roundQty(
+    Object.values(returnQtyMap).reduce((sum, v) => sum + (Number(v) > 0 ? Number(v) : 0), 0)
+  );
 
   return (
     <div className="space-y-6">
@@ -576,7 +725,7 @@ export const FactoryWorkspace: React.FC = () => {
       )}
 
       {/* Segmented Navigation */}
-      <div className="flex items-center gap-1 p-1 bg-zinc-100 rounded-xl w-fit border border-zinc-200">
+      <div className="flex flex-wrap items-center gap-1 p-1 bg-zinc-100 rounded-xl w-fit border border-zinc-200">
         <button
           type="button"
           onClick={() => setActiveSubTab('dispatch')}
@@ -586,7 +735,18 @@ export const FactoryWorkspace: React.FC = () => {
               : 'text-zinc-600 hover:text-zinc-900'
           }`}
         >
-          التوريدات إلى الإنتاج ({transfers.length})
+          التوريدات إلى الإنتاج ({dispatchTransfers.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveSubTab('returns')}
+          className={`min-h-[40px] px-4 py-2 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+            activeSubTab === 'returns'
+              ? 'bg-white text-zinc-900 shadow-sm'
+              : 'text-zinc-600 hover:text-zinc-900'
+          }`}
+        >
+          المرتجعات من الإنتاج ({returnTransfers.length})
         </button>
         <button
           type="button"
@@ -750,13 +910,13 @@ export const FactoryWorkspace: React.FC = () => {
                 سجل توريدات اليوم وحالات الاستلام
               </h3>
             </div>
-            {transfers.length === 0 ? (
+            {dispatchTransfers.length === 0 ? (
               <div className="p-8 text-center text-sm text-zinc-500">
                 لم يتم إرسال توريدات في تاريخ الجرد المحدد بعد.
               </div>
             ) : (
               <div className="divide-y divide-zinc-100">
-                {transfers.map((trf) => (
+                {dispatchTransfers.map((trf) => (
                   <div key={trf.id} className="p-4 space-y-2">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-mono text-xs font-bold text-zinc-900">
@@ -793,6 +953,191 @@ export const FactoryWorkspace: React.FC = () => {
                     <div className="text-[11px] text-zinc-400">
                       وقت الإرسال: {formatTimestampAden(trf.createdAt)}
                       {trf.receivedByName ? ` · المستلم: ${trf.receivedByName}` : ''}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 1B: Returns from Production to Factory */}
+      {activeSubTab === 'returns' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="lg:col-span-7 bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold text-zinc-900 font-display">
+                  {isDeptQtyReadOnly
+                    ? 'مرتجعات الإنتاج إلى المعمل (اطلاع فقط)'
+                    : 'الكميات المرتجعة من الإنتاج إلى المعمل'}
+                </h3>
+                <p className="text-xs text-zinc-500">
+                  أدخل الكميات المرتجعة ليتم سحبها وإنقاصها تلقائياً من الكمية المرحلة في نفس اليوم والتقارير
+                </p>
+              </div>
+              {!isDeptQtyReadOnly && (
+                <span className="text-xs font-semibold text-zinc-700 tabular-nums shrink-0">
+                  إجمالي المرتجع: {totalReturnUnits} وحدة
+                </span>
+              )}
+            </div>
+
+            {dispatchTransfers.length === 0 ? (
+              <div className="p-8 text-center text-sm text-zinc-500">
+                لا توجد كميات مرحلة من المعمل إلى الإنتاج لهذا اليوم بعد؛ أرسل توريداً أولاً لتتمكن
+                من سحب كميات مرتجعة.
+              </div>
+            ) : (
+              <>
+                <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+                  <table className="w-full text-right">
+                    <thead className="bg-zinc-50 border-b border-zinc-200 text-xs text-zinc-500 sticky top-0 z-10">
+                      <tr>
+                        <th className="px-5 py-3 font-semibold">الصنف</th>
+                        <th className="px-4 py-3 font-semibold">المرحّل المتاح اليوم</th>
+                        <th className="px-4 py-3 font-semibold">الوحدة</th>
+                        {!isDeptQtyReadOnly && (
+                          <th className="px-4 py-3 font-semibold text-center">الكمية المرتجعة</th>
+                        )}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-100 text-sm">
+                      {filteredProducts.map((prod) => {
+                        const effectiveUnits = getEffectiveProductUnits(prod);
+                        const sentToday = todayMovement.sent[prod.id] || 0;
+                        const returnedToday = todayMovement.returned[prod.id] || 0;
+                        const netAvailable = todayMovement.net[prod.id] || 0;
+                        const totalStr = returnQtyMap[prod.id] || '';
+                        const counts =
+                          returnCountsMap[prod.id] ??
+                          (totalStr !== ''
+                            ? decomposeTotalToUnitCounts(Number(totalStr), effectiveUnits)
+                            : {});
+                        const exceeds = Number(totalStr || 0) > netAvailable + 0.0001;
+
+                        return (
+                          <tr
+                            key={prod.id}
+                            className={
+                              sentToday === 0 ? 'opacity-60 hover:bg-zinc-50/50' : 'hover:bg-zinc-50/70'
+                            }
+                          >
+                            <td className="px-5 py-3">
+                              <div className="font-semibold text-zinc-900">{prod.name}</div>
+                              <div className="text-[11px] text-zinc-500">
+                                {categoryMap.get(prod.categoryId) || '—'}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 tabular-nums">
+                              <div className="font-bold text-zinc-900">{netAvailable}</div>
+                              {sentToday > 0 && (
+                                <div className="text-[11px] text-zinc-500">
+                                  مرسل {sentToday}
+                                  {returnedToday > 0 ? ` · مرتجع ${returnedToday}` : ''}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="text-xs font-semibold text-zinc-800">{prod.unit}</div>
+                              {effectiveUnits.length > 1 && (
+                                <div className="text-[11px] text-zinc-500">
+                                  {formatUnitsSummary(effectiveUnits)}
+                                </div>
+                              )}
+                            </td>
+                            {!isDeptQtyReadOnly && (
+                              <td className="px-4 py-3">
+                                <MultiUnitQtyInput
+                                  product={prod}
+                                  counts={counts}
+                                  totalValue={totalStr}
+                                  disabled={isSessionClosed || netAvailable <= 0}
+                                  onChange={(nextCounts, nextTotalStr) => {
+                                    setReturnCountsMap((prev) => ({
+                                      ...prev,
+                                      [prod.id]: nextCounts,
+                                    }));
+                                    setReturnQtyMap((prev) => ({
+                                      ...prev,
+                                      [prod.id]: nextTotalStr,
+                                    }));
+                                  }}
+                                />
+                                {exceeds && (
+                                  <div className="mt-1 text-[11px] font-semibold text-red-600 text-center">
+                                    يتجاوز المتاح ({netAvailable})
+                                  </div>
+                                )}
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {!isDeptQtyReadOnly && (
+                  <div className="p-5 border-t border-zinc-100 bg-zinc-50/50 space-y-3">
+                    <input
+                      type="text"
+                      value={returnNote}
+                      onChange={(e) => setReturnNote(e.target.value)}
+                      disabled={isSessionClosed}
+                      placeholder="سبب أو ملاحظة المرتجع (اختياري)..."
+                      className="w-full min-h-[42px] rounded-xl border border-zinc-200 bg-white px-4 text-sm focus:outline-none focus:border-[#D91B23]"
+                    />
+                    <button
+                      type="button"
+                      disabled={isSessionClosed || totalReturnUnits <= 0 || busy}
+                      onClick={() => setConfirmReturnOpen(true)}
+                      className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#D91B23] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#B9141B] transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                      <span>سحب المرتجع وإنقاصه من كميات اليوم</span>
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Return History */}
+          <div className="lg:col-span-5 bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-zinc-100">
+              <h3 className="text-base font-bold text-zinc-900 font-display">
+                سجل مرتجعات اليوم المسحوبة
+              </h3>
+            </div>
+            {returnTransfers.length === 0 ? (
+              <div className="p-8 text-center text-sm text-zinc-500">
+                لم يتم تسجيل أي مرتجعات من الإنتاج إلى المعمل اليوم.
+              </div>
+            ) : (
+              <div className="divide-y divide-zinc-100">
+                {returnTransfers.map((trf) => (
+                  <div key={trf.id} className="p-4 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs font-bold text-zinc-900">
+                        {trf.transferNumber}
+                      </span>
+                      <StatusBadge
+                        label={TRANSFER_STATUS_LABELS[trf.status]}
+                        tone="warning"
+                        icon="check"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-zinc-700 tabular-nums">
+                      <span>الكمية المرتجعة المسحوبة: <strong>{trf.totalSentQty}</strong></span>
+                      <span className="text-emerald-700 font-semibold">تم الخصم من اليوم</span>
+                    </div>
+                    {trf.factoryNote && (
+                      <div className="text-xs text-zinc-600">{trf.factoryNote}</div>
+                    )}
+                    <div className="text-[11px] text-zinc-400">
+                      وقت السحب: {formatTimestampAden(trf.createdAt)} · بواسطة: {trf.createdByName}
                     </div>
                   </div>
                 ))}
@@ -1016,6 +1361,17 @@ export const FactoryWorkspace: React.FC = () => {
         busy={busy}
         onConfirm={() => void handleCreateTransfer()}
         onCancel={() => setConfirmTransferOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={confirmReturnOpen}
+        title="تأكيد سحب الكمية المرتجعة من الإنتاج"
+        description={`سيتم تسجيل مرتجع بإجمالي ${totalReturnUnits} وحدة من الإنتاج إلى المعمل وإنقاصه تلقائياً من الكميات المرحلة ليوم ${currentSession?.inventoryDate || ''} في التقارير.`}
+        confirmLabel="سحب المرتجع واعتماد الخصم"
+        variant="danger"
+        busy={busy}
+        onConfirm={() => void handleCreateReturn()}
+        onCancel={() => setConfirmReturnOpen(false)}
       />
 
       <ConfirmDialog

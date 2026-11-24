@@ -41,7 +41,8 @@ export type ProductApprovalStatus =
 
 export type SessionStatus = 'open' | 'closed' | 'reopened';
 export type ReportStatus = 'draft' | 'submitted' | 'pending_review' | 'approved' | 'closed';
-export type TransferStatus = 'pending_receipt' | 'received' | 'discrepancy_logged';
+export type TransferType = 'dispatch' | 'return';
+export type TransferStatus = 'pending_receipt' | 'received' | 'discrepancy_logged' | 'returned';
 export type VarianceType = 'matched' | 'deficit' | 'surplus';
 export type ApprovalType =
   | 'product_technical'
@@ -211,6 +212,7 @@ export interface FactoryTransfer {
   branchId: string;
   inventoryDate: string;
   transferNumber: string;
+  transferType?: TransferType;
   status: TransferStatus;
   totalSentQty: number;
   totalReceivedQty: number;
@@ -270,6 +272,7 @@ export interface ProductResult {
   openingBalance: number;
   factorySentQty: number;
   factoryReceivedQty: number;
+  factoryReturnedQty?: number;
   deliveryVarianceQty: number;
   independentProductionQty: number;
   totalProduction: number;

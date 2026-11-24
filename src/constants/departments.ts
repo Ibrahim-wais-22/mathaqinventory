@@ -153,6 +153,7 @@ export const TRANSFER_STATUS_LABELS: Record<TransferStatus, string> = {
   pending_receipt: 'بانتظار الاستلام',
   received: 'تم الاستلام مطابقاً',
   discrepancy_logged: 'مستلم مع فرق تسليم',
+  returned: 'مرتجع مسحوب إلى المعمل',
 };
 
 export const PRODUCT_APPROVAL_LABELS: Record<ProductApprovalStatus, string> = {
