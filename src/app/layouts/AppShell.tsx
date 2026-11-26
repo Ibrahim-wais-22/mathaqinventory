@@ -24,9 +24,10 @@ import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { BrandLogo } from '../../components/common/BrandLogo';
 import { ChangePasswordModal } from '../../components/common/ChangePasswordModal';
 import { OfflineIndicator } from '../../components/common/OfflineIndicator';
-import { PWAInstallButton } from '../../components/common/PWAInstallButton';
+import { PWAInstallBanner, PWAInstallButton } from '../../components/common/PWAInstallButton';
 import { RecentActivityDrawer } from '../../components/common/RecentActivityDrawer';
 import type { NavTabId } from '../../modules/inventory/ExecutiveDashboard';
+import { getPreviousAdenDate, getTodayAdenDate } from '../../utils/dateAden';
 
 interface NavItem {
   id: NavTabId;
@@ -90,11 +91,13 @@ export const AppShell: React.FC<{
   }, [account, isAdmin, hasPermission]);
 
   const allowBackdate = isAdmin || hasPermission('backdate_entries');
+  const todayAden = getTodayAdenDate();
+  const yesterdayAden = getPreviousAdenDate(todayAden);
 
   return (
-    <div className="min-h-screen bg-[#FAFAFA] text-[#18181B] flex flex-col" dir="rtl">
+    <div className="min-h-[100dvh] bg-[#FAFAFA] text-[#18181B] flex flex-col safe-px" dir="rtl">
       {/* Sticky Top Header + Top Tab Bar */}
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-zinc-200 no-print">
+      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-zinc-200 safe-pt no-print">
         {/* Top Utility Row: Brand, Date Control, User & Logout */}
         <div className="max-w-7xl mx-auto px-4 lg:px-8 h-14 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
@@ -113,17 +116,54 @@ export const AppShell: React.FC<{
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* Inventory Date Selector (Asia/Aden) */}
+            {/* Inventory Date Selector (Asia/Aden): Yesterday/Today switcher for all staff + full picker for Admin */}
             <div className="flex items-center gap-1.5 shrink-0">
-              <Calendar className="h-4 w-4 text-zinc-400 hidden sm:block" />
-              <input
-                type="date"
-                value={inventoryDate}
-                disabled={!allowBackdate}
-                onChange={(e) => setInventoryDate(e.target.value)}
-                aria-label="تاريخ الجرد"
-                className="min-h-[36px] rounded-xl border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-800 tabular-nums disabled:bg-zinc-100"
-              />
+              <div
+                className="inline-flex items-center rounded-xl border border-zinc-200 bg-zinc-100 p-0.5"
+                role="group"
+                aria-label="اختيار يوم الجرد السريع"
+              >
+                <button
+                  type="button"
+                  onClick={() => setInventoryDate(yesterdayAden)}
+                  className={`min-h-[30px] px-2.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                    inventoryDate === yesterdayAden
+                      ? 'bg-white text-[#D91B23] shadow-xs'
+                      : 'text-zinc-600 hover:text-zinc-900'
+                  }`}
+                  title={`تبديل لجرد أمس (${yesterdayAden})`}
+                >
+                  أمس
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInventoryDate(todayAden)}
+                  className={`min-h-[30px] px-2.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                    inventoryDate === todayAden
+                      ? 'bg-white text-[#D91B23] shadow-xs'
+                      : 'text-zinc-600 hover:text-zinc-900'
+                  }`}
+                  title={`تبديل لجرد اليوم (${todayAden})`}
+                >
+                  اليوم
+                </button>
+              </div>
+
+              {allowBackdate ? (
+                <input
+                  type="date"
+                  value={inventoryDate}
+                  onChange={(e) => setInventoryDate(e.target.value)}
+                  aria-label="تاريخ الجرد"
+                  className="min-h-[36px] rounded-xl border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-800 tabular-nums"
+                />
+              ) : (
+                <span className="hidden sm:inline-flex items-center gap-1 text-xs font-semibold text-zinc-700 tabular-nums whitespace-nowrap">
+                  <Calendar className="h-3.5 w-3.5 text-zinc-400" />
+                  {inventoryDate}
+                </span>
+              )}
+
               {currentSession && (
                 <span className="hidden md:inline text-xs text-zinc-500 whitespace-nowrap">
                   · {SESSION_STATUS_LABELS[currentSession.status]}
@@ -204,11 +244,12 @@ export const AppShell: React.FC<{
         {children}
       </main>
 
-      <footer className="py-3 px-4 text-center text-[11px] font-medium text-zinc-400 no-print">
+      <footer className="py-3 px-4 text-center text-[11px] font-medium text-zinc-400 safe-pb no-print">
         بواسطة م.ابراهيم ويس
       </footer>
 
       <OfflineIndicator />
+      <PWAInstallBanner />
 
       {isAdmin && (
         <RecentActivityDrawer

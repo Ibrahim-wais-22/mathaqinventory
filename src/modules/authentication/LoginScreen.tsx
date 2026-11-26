@@ -12,7 +12,8 @@ import {
 import { BRAND_NAME } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { BrandLogo } from '../../components/common/BrandLogo';
-import { PWAInstallButton } from '../../components/common/PWAInstallButton';
+import { OfflineIndicator } from '../../components/common/OfflineIndicator';
+import { PWAInstallBanner, PWAInstallButton } from '../../components/common/PWAInstallButton';
 
 type LoginTab = 'credentials' | 'first_time';
 
@@ -90,7 +91,7 @@ export const LoginScreen: React.FC = () => {
   const isBusy = authLoading || submitting;
 
   return (
-    <div className="min-h-screen bg-[#FAFAFA] flex flex-col p-4 sm:p-6" dir="rtl">
+    <div className="min-h-[100dvh] bg-[#FAFAFA] flex flex-col p-4 sm:p-6 safe-pt safe-pb safe-px" dir="rtl">
       <div className="flex items-center justify-between max-w-5xl w-full mx-auto">
         <div className="flex items-center gap-3">
           <BrandLogo size="sm" />
@@ -253,6 +254,8 @@ export const LoginScreen: React.FC = () => {
       <footer className="pt-2 pb-1 text-center text-[11px] font-medium text-zinc-400">
         بواسطة م.ابراهيم ويس
       </footer>
+      <OfflineIndicator />
+      <PWAInstallBanner />
     </div>
   );
 };

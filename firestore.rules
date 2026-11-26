@@ -400,11 +400,11 @@ service cloud.firestore {
         data.status in ['draft', 'submitted', 'pending_review', 'approved', 'closed'] &&
         isNonNegNumber(data.itemCount) &&
         isValidId(data.createdBy) &&
-        (!('submittedBy' in data) || isValidString(data.submittedBy, 128)) &&
-        (!('submittedByName' in data) || isValidString(data.submittedByName, 120)) &&
-        (!('approvedBy' in data) || isValidString(data.approvedBy, 128)) &&
-        (!('approvedByName' in data) || isValidString(data.approvedByName, 120)) &&
-        (!('lastCorrectionReason' in data) || isValidString(data.lastCorrectionReason, 500)) &&
+        (!('submittedBy' in data) || data.submittedBy == null || isValidString(data.submittedBy, 128)) &&
+        (!('submittedByName' in data) || data.submittedByName == null || isValidString(data.submittedByName, 120)) &&
+        (!('approvedBy' in data) || data.approvedBy == null || isValidString(data.approvedBy, 128)) &&
+        (!('approvedByName' in data) || data.approvedByName == null || isValidString(data.approvedByName, 120)) &&
+        (!('lastCorrectionReason' in data) || data.lastCorrectionReason == null || isValidString(data.lastCorrectionReason, 500)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -440,10 +440,10 @@ service cloud.firestore {
       allow list: if isActiveUser() && (isAdmin() || userDepartment() == existing().department);
       allow create: if isActiveUser() && isValidId(reportId) && isValidDepartmentReport(incoming()) &&
         exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
-        sessionIsOpen(incoming().sessionId) &&
+        (isAdmin() || sessionIsOpen(incoming().sessionId)) &&
         incoming().createdBy == request.auth.uid &&
         incoming().createdAt == request.time && incoming().updatedAt == request.time &&
-        (userDepartment() == incoming().department || isBootstrapAdmin()) &&
+        (isAdmin() || userDepartment() == incoming().department) &&
         incoming().status == 'draft';
       allow update: if isActiveUser() && isValidId(reportId) && isValidDepartmentReport(incoming()) &&
         incoming().sessionId == existing().sessionId &&
@@ -456,14 +456,17 @@ service cloud.firestore {
         (
           (
             isAdmin() &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'approvedBy', 'approvedByName', 'lastCorrectionReason', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'itemCount', 'submittedBy', 'submittedByName', 'approvedBy', 'approvedByName', 'lastCorrectionReason', 'updatedAt'])
           ) ||
           (
             sessionIsOpen(existing().sessionId) &&
             (userDepartment() == existing().department || isBootstrapAdmin()) &&
-            existing().status == 'draft' &&
+            (
+              existing().status == 'draft' ||
+              (userDepartment() == 'factory' && existing().status == 'submitted')
+            ) &&
             incoming().status in ['draft', 'submitted'] &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'itemCount', 'submittedBy', 'submittedByName', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'itemCount', 'submittedBy', 'submittedByName', 'lastCorrectionReason', 'updatedAt'])
           )
         );
 
@@ -483,14 +486,14 @@ service cloud.firestore {
           incoming().createdAt == request.time && incoming().updatedAt == request.time &&
           exists(/databases/$(database)/documents/departmentReports/$(reportId)) &&
           (
-            (
-              isAdmin() &&
-              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status != 'draft'
-            ) ||
+            isAdmin() ||
             (
               sessionIsOpen(incoming().sessionId) &&
-              (get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() || isBootstrapAdmin()) &&
-              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'draft'
+              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() &&
+              (
+                get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'draft' ||
+                (userDepartment() == 'factory' && get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'submitted')
+              )
             )
           );
         allow update: if isActiveUser() && isValidId(reportId) && isValidId(productId) && isValidDepartmentReportItem(incoming()) &&
@@ -502,16 +505,26 @@ service cloud.firestore {
           incoming().updatedBy == request.auth.uid &&
           incoming().updatedAt == request.time &&
           (
-            (
-              isAdmin() &&
-              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status != 'draft'
-            ) ||
+            isAdmin() ||
             (
               sessionIsOpen(existing().sessionId) &&
-              (get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() || isBootstrapAdmin()) &&
-              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'draft'
+              get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == userDepartment() &&
+              (
+                get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'draft' ||
+                (userDepartment() == 'factory' && get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status == 'submitted')
+              )
             )
           );
+        allow delete: if isActiveUser() && isValidId(reportId) && isValidId(productId) && (
+          isAdmin() ||
+          (
+            isDept('factory') &&
+            sessionIsOpen(existing().sessionId) &&
+            exists(/databases/$(database)/documents/departmentReports/$(reportId)) &&
+            get(/databases/$(database)/documents/departmentReports/$(reportId)).data.department == 'factory' &&
+            get(/databases/$(database)/documents/departmentReports/$(reportId)).data.status in ['draft', 'submitted']
+          )
+        );
       }
     }
 
@@ -583,12 +596,35 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         sessionIsOpen(existing().sessionId) &&
-        (isDept('production') || isBootstrapAdmin()) &&
-        existing().status == 'pending_receipt' &&
-        incoming().status in ['received', 'discrepancy_logged'] &&
-        incoming().totalSentQty == existing().totalSentQty &&
-        incoming().receivedBy == request.auth.uid &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'totalReceivedQty', 'totalVarianceQty', 'productionNote', 'receivedBy', 'receivedByName', 'updatedAt']);
+        (
+          (
+            (isDept('production') || isBootstrapAdmin()) &&
+            existing().status == 'pending_receipt' &&
+            incoming().status in ['received', 'discrepancy_logged'] &&
+            incoming().totalSentQty == existing().totalSentQty &&
+            incoming().receivedBy == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'totalReceivedQty', 'totalVarianceQty', 'productionNote', 'receivedBy', 'receivedByName', 'updatedAt'])
+          ) ||
+          (
+            (isDept('factory') || isAdmin()) &&
+            existing().status == 'pending_receipt' &&
+            incoming().status == 'pending_receipt' &&
+            (!('transferType' in incoming()) || incoming().transferType == 'dispatch') &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['totalSentQty', 'factoryNote', 'updatedAt'])
+          ) ||
+          (
+            (isDept('factory') || isAdmin()) &&
+            existing().status == 'returned' &&
+            incoming().status == 'returned' &&
+            incoming().totalReceivedQty == incoming().totalSentQty &&
+            incoming().totalVarianceQty == 0 &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['totalSentQty', 'totalReceivedQty', 'factoryNote', 'updatedAt'])
+          )
+        );
+      allow delete: if isActiveUser() && isValidId(transferId) &&
+        (isDept('factory') || isAdmin()) &&
+        sessionIsOpen(existing().sessionId) &&
+        existing().status in ['pending_receipt', 'returned'];
 
       match /items/{productId} {
         allow get: if isActiveUser() && isValidId(transferId) && isValidId(productId) && (isAdmin() || isDept('factory') || isDept('production'));
@@ -597,20 +633,36 @@ service cloud.firestore {
           incoming().transferId == transferId &&
           incoming().productId == productId &&
           incoming().createdAt == request.time && incoming().updatedAt == request.time &&
-          existsAfter(/databases/$(database)/documents/factoryTransfers/$(transferId)) &&
+          (
+            existsAfter(/databases/$(database)/documents/factoryTransfers/$(transferId)) ||
+            exists(/databases/$(database)/documents/factoryTransfers/$(transferId))
+          ) &&
           sessionIsOpen(incoming().sessionId) &&
-          (isDept('factory') || isBootstrapAdmin());
-        allow update: if isActiveUser() && isValidId(transferId) && isValidId(productId) && isValidFactoryTransferItem(incoming()) &&
+          (isDept('factory') || isAdmin());
+        allow update: if isActiveUser() && isValidId(transferId) && isValidFactoryTransferItem(incoming()) &&
           incoming().transferId == existing().transferId &&
           incoming().sessionId == existing().sessionId &&
           incoming().productId == existing().productId &&
-          incoming().sentQty == existing().sentQty &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
           sessionIsOpen(existing().sessionId) &&
-          (isDept('production') || isBootstrapAdmin()) &&
-          get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status == 'pending_receipt' &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['receivedQty', 'receivedBreakdown', 'varianceQty', 'note', 'updatedAt']);
+          (
+            (
+              (isDept('production') || isBootstrapAdmin()) &&
+              incoming().sentQty == existing().sentQty &&
+              get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status == 'pending_receipt' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['receivedQty', 'receivedBreakdown', 'varianceQty', 'note', 'updatedAt'])
+            ) ||
+            (
+              (isDept('factory') || isAdmin()) &&
+              get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status in ['pending_receipt', 'returned'] &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['sentQty', 'sentBreakdown', 'receivedQty', 'receivedBreakdown', 'varianceQty', 'note', 'updatedAt'])
+            )
+          );
+        allow delete: if isActiveUser() && isValidId(transferId) && isValidId(productId) &&
+          (isDept('factory') || isAdmin()) &&
+          sessionIsOpen(existing().sessionId) &&
+          get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status in ['pending_receipt', 'returned'];
       }
     }
 
@@ -638,7 +690,8 @@ service cloud.firestore {
         sessionIsOpen(incoming().sessionId) &&
         incoming().createdBy == request.auth.uid &&
         incoming().createdAt == request.time && incoming().updatedAt == request.time &&
-        (isDept('production') || isBootstrapAdmin());
+        (isDept('production') || isAdmin());
+      allow delete: if isAdmin() && isValidId(entryId);
     }
 
     // Centralized Computed Product Results

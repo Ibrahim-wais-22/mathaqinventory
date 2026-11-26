@@ -175,6 +175,24 @@ export const ReportsHub: React.FC<{ initialReportId?: string }> = ({ initialRepo
     toDate,
   ]);
 
+  const reportsSignature = useMemo(
+    () =>
+      deptReports
+        .map((r) => `${r.id}:${r.status}:${r.itemCount}:${r.updatedAt?.seconds ?? 0}`)
+        .sort()
+        .join('|'),
+    [deptReports]
+  );
+
+  const transfersSignature = useMemo(
+    () =>
+      transfers
+        .map((t) => `${t.id}:${t.status}:${t.totalReceivedQty}:${t.updatedAt?.seconds ?? 0}`)
+        .sort()
+        .join('|'),
+    [transfers]
+  );
+
   // Keep open/reopened sessions' central results numerically updated when viewing reports
   useEffect(() => {
     if (!account || !isAdmin || products.length === 0 || categories.length === 0) return;
@@ -190,8 +208,8 @@ export const ReportsHub: React.FC<{ initialReportId?: string }> = ({ initialRepo
     account?.uid,
     isAdmin,
     sessions,
-    transfers.length,
-    deptReports.length,
+    transfersSignature,
+    reportsSignature,
     products.length,
     categories.length,
   ]);

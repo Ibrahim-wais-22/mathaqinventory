@@ -34,7 +34,7 @@ import type {
   UserAccount,
   UserInvite,
 } from '../../types/inventory';
-import { getTodayAdenDate } from '../../utils/dateAden';
+import { getPreviousAdenDate, getTodayAdenDate, makeSessionId } from '../../utils/dateAden';
 import { normalizePhoneForPassword, verifyPassword } from '../../utils/passwordCrypto';
 import {
   OperationType,
@@ -166,13 +166,23 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [isCredentialUnlocked, setIsCredentialUnlocked] = useState(false);
   const credentialLoginInProgressRef = useRef(false);
 
-  const [inventoryDate, setInventoryDate] = useState<string>(() => getTodayAdenDate());
+  const [inventoryDate, setInventoryDateState] = useState<string>(() => getTodayAdenDate());
+  const [defaultDateResolved, setDefaultDateResolved] = useState(false);
+  const hasManuallySelectedDateRef = useRef(false);
+  const autoDateCheckedForUidRef = useRef<string | null>(null);
   const [activeBranchId] = useState<string>(DEFAULT_BRANCH_ID);
   const [currentSession, setCurrentSession] = useState<DailySession | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+
+  const setInventoryDate = (date: string) => {
+    if (!date) return;
+    hasManuallySelectedDateRef.current = true;
+    setDefaultDateResolved(true);
+    setInventoryDateState(date);
+  };
 
   useEffect(() => {
     void testConnection();
@@ -351,11 +361,55 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, [account?.uid, account?.status, account?.role, account?.department, account?.permissions, isCredentialUnlocked]);
 
+  // Resolve initial inventory date for next-morning workflow:
+  // If yesterday's session is not yet closed, default to yesterday so staff record morning reports on the right day.
+  useEffect(() => {
+    if (!account || account.status !== 'active' || !isCredentialUnlocked) {
+      autoDateCheckedForUidRef.current = null;
+      hasManuallySelectedDateRef.current = false;
+      setDefaultDateResolved(false);
+      return;
+    }
+
+    if (hasManuallySelectedDateRef.current || autoDateCheckedForUidRef.current === account.uid) {
+      setDefaultDateResolved(true);
+      return;
+    }
+
+    let cancelled = false;
+    const today = getTodayAdenDate();
+    const yesterday = getPreviousAdenDate(today);
+    const yesterdaySessionId = makeSessionId(activeBranchId, yesterday);
+
+    getDoc(doc(db, 'dailySessions', yesterdaySessionId))
+      .then((snap) => {
+        if (cancelled) return;
+        autoDateCheckedForUidRef.current = account.uid;
+        if (!hasManuallySelectedDateRef.current) {
+          const isYesterdayClosed = snap.exists() && snap.data()?.status === 'closed';
+          setInventoryDateState(isYesterdayClosed ? today : yesterday);
+        }
+        setDefaultDateResolved(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        autoDateCheckedForUidRef.current = account.uid;
+        setDefaultDateResolved(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [account?.uid, account?.status, activeBranchId, isCredentialUnlocked]);
+
   // Ensure and subscribe to dailySession for active inventoryDate
   useEffect(() => {
     if (!account || account.status !== 'active' || !isCredentialUnlocked) {
       setCurrentSession(null);
       setSessionError(null);
+      return;
+    }
+    if (!defaultDateResolved) {
       return;
     }
 
@@ -406,7 +460,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       cancelled = true;
       unsub();
     };
-  }, [account?.uid, account?.status, activeBranchId, inventoryDate, isCredentialUnlocked]);
+  }, [account?.uid, account?.status, activeBranchId, inventoryDate, isCredentialUnlocked, defaultDateResolved]);
 
   const clearAuthError = () => setAuthError(null);
 

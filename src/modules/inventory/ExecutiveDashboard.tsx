@@ -1,14 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  collection,
-  limit,
-  onSnapshot,
-  orderBy,
-  query,
-  where,
-} from 'firebase/firestore';
+import { collection, doc, getDoc, limit, onSnapshot, orderBy, query, where } from 'firebase/firestore';
 import {
   AlertTriangle,
+  ArrowLeftRight,
   ArrowUpLeft,
   CalendarCheck,
   CheckCircle2,
@@ -17,6 +11,7 @@ import {
   Unlock,
 } from 'lucide-react';
 import {
+  DEFAULT_BRANCH_ID,
   DEPARTMENT_LABELS,
   OPERATIONAL_DEPARTMENTS,
   REPORT_STATUS_LABELS,
@@ -32,17 +27,19 @@ import {
   formatActionError,
   recalculateSessionResults,
   reopenDailySession,
+  transferDepartmentReportBetweenDates,
 } from '../../services/inventory/firestoreService';
 import type {
   ApprovalRequest,
   DailySession,
   DepartmentReport,
   FactoryTransfer,
+  OperationalDepartmentId,
   ProductResult,
 } from '../../types/inventory';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { StatusBadge } from '../../components/common/StatusBadge';
-import { formatArabicDate } from '../../utils/dateAden';
+import { formatArabicDate, getPreviousAdenDate, makeSessionId, shiftIsoDate } from '../../utils/dateAden';
 
 export type NavTabId =
   | 'dashboard'
@@ -72,6 +69,11 @@ export const ExecutiveDashboard: React.FC<{
   const [closeNote, setCloseNote] = useState('');
   const [reopenModalOpen, setReopenModalOpen] = useState(false);
   const [reopenReason, setReopenReason] = useState('');
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
+  const [transferDept, setTransferDept] = useState<OperationalDepartmentId>('sales');
+  const [transferFromDate, setTransferFromDate] = useState(inventoryDate);
+  const [transferToDate, setTransferToDate] = useState(() => getPreviousAdenDate(inventoryDate));
+  const [transferReason, setTransferReason] = useState('');
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
@@ -136,6 +138,24 @@ export const ExecutiveDashboard: React.FC<{
     };
   }, [currentSession?.id]);
 
+  const reportsSignature = useMemo(
+    () =>
+      reports
+        .map((r) => `${r.id}:${r.status}:${r.itemCount}:${r.updatedAt?.seconds ?? 0}`)
+        .sort()
+        .join('|'),
+    [reports]
+  );
+
+  const transfersSignature = useMemo(
+    () =>
+      transfers
+        .map((t) => `${t.id}:${t.status}:${t.totalReceivedQty}:${t.updatedAt?.seconds ?? 0}`)
+        .sort()
+        .join('|'),
+    [transfers]
+  );
+
   // Keep central calculations synced when Management views an open/reopened session
   useEffect(() => {
     if (
@@ -155,8 +175,8 @@ export const ExecutiveDashboard: React.FC<{
     account?.uid,
     currentSession?.id,
     currentSession?.status,
-    reports.length,
-    transfers.length,
+    reportsSignature,
+    transfersSignature,
     products.length,
     categories.length,
   ]);
@@ -166,8 +186,38 @@ export const ExecutiveDashboard: React.FC<{
     setCalculating(true);
     setFeedback(null);
     try {
+      const prevDate = getPreviousAdenDate(currentSession.inventoryDate);
+      const prevSnap = await getDoc(
+        doc(db, 'dailySessions', makeSessionId(currentSession.branchId, prevDate))
+      );
+      if (prevSnap.exists() && prevSnap.data()?.status !== 'closed') {
+        await recalculateSessionResults(
+          account,
+          { id: prevSnap.id, ...(prevSnap.data() as Omit<DailySession, 'id'>) },
+          products,
+          categories
+        );
+      }
+
       await recalculateSessionResults(account, currentSession, products, categories);
-      setFeedback({ type: 'success', text: 'تم تحديث وحساب نتائج الجرد المركزية بنجاح.' });
+
+      const nextDate = shiftIsoDate(currentSession.inventoryDate, 1);
+      const nextSnap = await getDoc(
+        doc(db, 'dailySessions', makeSessionId(currentSession.branchId, nextDate))
+      );
+      if (nextSnap.exists() && nextSnap.data()?.status !== 'closed') {
+        await recalculateSessionResults(
+          account,
+          { id: nextSnap.id, ...(nextSnap.data() as Omit<DailySession, 'id'>) },
+          products,
+          categories
+        );
+      }
+
+      setFeedback({
+        type: 'success',
+        text: 'تم تحديث الحساب الآلي ونقل المتبقي الصالح مؤقتاً للمطابقة والتأكد قبل الإغلاق.',
+      });
     } catch (err) {
       setFeedback({
         type: 'error',
@@ -275,6 +325,47 @@ export const ExecutiveDashboard: React.FC<{
     }
   };
 
+  const openTransferModal = () => {
+    setTransferDept('sales');
+    setTransferFromDate(inventoryDate);
+    setTransferToDate(getPreviousAdenDate(inventoryDate));
+    setTransferReason('');
+    setTransferModalOpen(true);
+  };
+
+  const handleTransferReportBetweenDates = async () => {
+    if (!account) return;
+    setCalculating(true);
+    setFeedback(null);
+    try {
+      const branchId = currentSession?.branchId || account.branchId || DEFAULT_BRANCH_ID;
+      const res = await transferDepartmentReportBetweenDates(
+        account,
+        branchId,
+        transferDept,
+        transferFromDate,
+        transferToDate,
+        transferReason,
+        products,
+        categories
+      );
+      setTransferModalOpen(false);
+      setTransferReason('');
+      setInventoryDate(transferToDate);
+      setFeedback({
+        type: 'success',
+        text: `تم نقل تقرير ${DEPARTMENT_LABELS[transferDept]} (${res.movedItemsCount} صنف) من ${transferFromDate} إلى ${transferToDate} وإعادة احتساب اليومين بنجاح.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: formatActionError(err, 'تعذر نقل التقرير بين التاريخين.'),
+      });
+    } finally {
+      setCalculating(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Executive Session Control Bar */}
@@ -348,6 +439,36 @@ export const ExecutiveDashboard: React.FC<{
         </div>
       )}
 
+      {currentSession && !currentSession.openingBalanceApproved && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 text-xs text-amber-900">
+            <AlertTriangle className="h-4 w-4 text-amber-700 shrink-0 mt-0.5" />
+            <span>
+              اليوم السابق (<strong>{getPreviousAdenDate(inventoryDate)}</strong>) غير مغلق بعد؛ يمكنك
+              الضغط على <strong>«تحديث ونقل المتبقي للمطابقة»</strong> لسحب المتبقي الصالح مؤقتاً والتأكد
+              من المطابقة قبل الإغلاق النهائي.
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={calculating || currentSession.status === 'closed'}
+              onClick={() => void handleManualRecalculate()}
+              className="min-h-[34px] rounded-lg bg-[#D91B23] px-3 text-xs font-bold text-white hover:bg-[#B9141B] cursor-pointer whitespace-nowrap disabled:opacity-50"
+            >
+              تحديث ونقل المتبقي للمطابقة
+            </button>
+            <button
+              type="button"
+              onClick={() => setInventoryDate(getPreviousAdenDate(inventoryDate))}
+              className="min-h-[34px] rounded-lg border border-amber-300 bg-white px-3 text-xs font-bold text-amber-900 hover:bg-amber-100 cursor-pointer whitespace-nowrap"
+            >
+              فتح يوم {getPreviousAdenDate(inventoryDate)} لإغلاقه
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Clickable 6-Metric KPI Strip */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
         {[
@@ -413,15 +534,26 @@ export const ExecutiveDashboard: React.FC<{
       {/* Department Reports Status + Variance (Shortage & Surplus) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-5 bg-white border border-zinc-200 rounded-2xl overflow-hidden">
-          <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
+          <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between gap-2">
             <h3 className="text-base font-bold text-zinc-900 font-display">حالة تقارير الإدارات</h3>
-            <button
-              type="button"
-              onClick={() => onNavigate('reports', 'department_compliance')}
-              className="text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer"
-            >
-              التفاصيل
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={openTransferModal}
+                className="inline-flex items-center gap-1 text-xs font-bold text-zinc-700 hover:text-[#D91B23] cursor-pointer whitespace-nowrap"
+                title="نقل تقرير تم إدخاله بتاريخ خاطئ إلى التاريخ الصحيح (للإدارة فقط)"
+              >
+                <ArrowLeftRight className="h-3.5 w-3.5" />
+                <span>نقل لتاريخ آخر</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigate('reports', 'department_compliance')}
+                className="text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer whitespace-nowrap"
+              >
+                التفاصيل
+              </button>
+            </div>
           </div>
           <div className="divide-y divide-zinc-100">
             {OPERATIONAL_DEPARTMENTS.map((dept) => {
@@ -691,6 +823,85 @@ export const ExecutiveDashboard: React.FC<{
             placeholder="اذكر سبب إعادة فتح اليوم المغلق..."
             className="w-full rounded-xl border border-zinc-200 p-3 text-sm"
           />
+        </div>
+      </ConfirmDialog>
+
+      {/* Admin-only Report Date Transfer Modal */}
+      <ConfirmDialog
+        open={transferModalOpen}
+        title="نقل تقرير قسم إلى تاريخ آخر (للإدارة فقط)"
+        description="ينقل بيانات القسم كاملة من تاريخ أُدخل بالخطأ إلى التاريخ الصحيح، ويُفرغ تقرير المصدر ليعود مسودة جاهزة للإدخال الجديد، مع إعادة احتساب اليومين."
+        confirmLabel="تنفيذ النقل وإعادة الاحتساب"
+        variant="danger"
+        busy={calculating}
+        confirmDisabled={
+          !transferFromDate ||
+          !transferToDate ||
+          transferFromDate === transferToDate ||
+          !transferReason.trim()
+        }
+        onConfirm={() => void handleTransferReportBetweenDates()}
+        onCancel={() => setTransferModalOpen(false)}
+      >
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-semibold text-zinc-700 mb-1">القسم</label>
+            <select
+              value={transferDept}
+              onChange={(e) => setTransferDept(e.target.value as OperationalDepartmentId)}
+              className="w-full min-h-[40px] rounded-xl border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-800"
+            >
+              {OPERATIONAL_DEPARTMENTS.map((dept) => (
+                <option key={dept} value={dept}>
+                  {DEPARTMENT_LABELS[dept]}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                من تاريخ (المُدخل بالخطأ)
+              </label>
+              <input
+                type="date"
+                value={transferFromDate}
+                onChange={(e) => setTransferFromDate(e.target.value)}
+                className="w-full min-h-[40px] rounded-xl border border-zinc-200 bg-white px-3 text-sm font-semibold tabular-nums"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                إلى تاريخ (التاريخ الصحيح)
+              </label>
+              <input
+                type="date"
+                value={transferToDate}
+                onChange={(e) => setTransferToDate(e.target.value)}
+                className="w-full min-h-[40px] rounded-xl border border-zinc-200 bg-white px-3 text-sm font-semibold tabular-nums"
+              />
+            </div>
+          </div>
+
+          {transferDept === 'factory' && (
+            <p className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-[11px] text-amber-900">
+              ملاحظة: ينقل هذا الإجراء تقرير «الكميات المجهزة» للمعمل فقط ولا ينقل إشعارات التوريد أو المرتجعات.
+            </p>
+          )}
+
+          <div>
+            <label className="block text-xs font-semibold text-zinc-700 mb-1">
+              سبب النقل (إلزامي لسجل التدقيق)
+            </label>
+            <textarea
+              rows={2}
+              value={transferReason}
+              onChange={(e) => setTransferReason(e.target.value)}
+              placeholder="مثال: تم إدخال مبيعات يوم 25 داخل يوم 26 بالخطأ..."
+              className="w-full rounded-xl border border-zinc-200 p-3 text-sm"
+            />
+          </div>
         </div>
       </ConfirmDialog>
     </div>

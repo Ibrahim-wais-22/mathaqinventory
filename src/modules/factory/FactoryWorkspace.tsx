@@ -7,9 +7,11 @@ import {
   query,
   where,
 } from 'firebase/firestore';
+import * as XLSX from 'xlsx';
 import {
   CopyCheck,
   Edit3,
+  FileSpreadsheet,
   PackagePlus,
   Plus,
   RefreshCw,
@@ -17,7 +19,9 @@ import {
   Save,
   Search,
   Send,
+  Trash2,
   Truck,
+  X,
 } from 'lucide-react';
 import {
   PRODUCT_APPROVAL_LABELS,
@@ -29,17 +33,19 @@ import { OperationType, db, handleFirestoreError } from '../../services/firebase
 import {
   createFactoryReturn,
   createFactoryTransfer,
+  deleteFactoryTransfer,
   ensureDepartmentReport,
   formatActionError,
   proposeProductByFactory,
-  requestReportCorrection,
   saveDepartmentReportDraft,
   submitDepartmentReport,
+  updateFactoryTransfer,
 } from '../../services/inventory/firestoreService';
 import type {
   DepartmentReport,
   DepartmentReportItem,
   FactoryTransfer,
+  FactoryTransferItem,
   Product,
   ProductUnitOption,
   UnitBreakdown,
@@ -48,6 +54,7 @@ import { roundQty } from '../../services/inventory/calculator';
 import {
   buildHalvesAndQuartersPreset,
   decomposeTotalToUnitCounts,
+  formatBreakdownText,
   formatUnitsSummary,
   getEffectiveProductUnits,
   sumUnitCounts,
@@ -102,11 +109,18 @@ export const FactoryWorkspace: React.FC = () => {
   const [newProdEnableParts, setNewProdEnableParts] = useState(true);
   const [newProdReason, setNewProdReason] = useState('');
 
-  // Post-submission correction modal
-  const [corrTarget, setCorrTarget] = useState<Product | null>(null);
-  const [corrNewVal, setCorrNewVal] = useState('');
-  const [corrCounts, setCorrCounts] = useState<Record<string, string>>({});
-  const [corrReason, setCorrReason] = useState('');
+  // Edit pending transfer modal
+  const [editingTransfer, setEditingTransfer] = useState<FactoryTransfer | null>(null);
+  const [editTransferQtyMap, setEditTransferQtyMap] = useState<Record<string, string>>({});
+  const [editTransferCountsMap, setEditTransferCountsMap] = useState<
+    Record<string, Record<string, string>>
+  >({});
+  const [editTransferNote, setEditTransferNote] = useState('');
+  const [editTransferLoading, setEditTransferLoading] = useState(false);
+
+  // Delete transfer or return confirmation
+  const [deletingTransfer, setDeletingTransfer] = useState<FactoryTransfer | null>(null);
+  const [exportingExcel, setExportingExcel] = useState(false);
 
   const approvedProducts = useMemo(
     () =>
@@ -358,7 +372,13 @@ export const FactoryWorkspace: React.FC = () => {
       const count = items.filter((i) => i.preparedQty !== null).length;
       await submitDepartmentReport(account!, activeReport, count);
       setConfirmSubmitOpen(false);
-      setFeedback({ type: 'success', text: 'تم ترحيل تقرير المعمل وإغلاق التعديل المباشر.' });
+      setFeedback({
+        type: 'success',
+        text:
+          activeReport.status === 'submitted'
+            ? 'تم حفظ وتحديث تقرير الكميات المجهزة بالمعمل بنجاح.'
+            : 'تم ترحيل تقرير المعمل بنجاح (يبقى مفتوحاً للتعديل قبل إغلاق اليوم).',
+      });
     } catch (err) {
       setConfirmSubmitOpen(false);
       setFeedback({
@@ -621,35 +641,371 @@ export const FactoryWorkspace: React.FC = () => {
     }
   };
 
-  const handleRequestCorrection = async () => {
-    if (!account || !report || !corrTarget) return;
+  const openEditTransferModal = async (trf: FactoryTransfer) => {
+    setEditingTransfer(trf);
+    setEditTransferNote(trf.factoryNote || '');
+    setEditTransferQtyMap({});
+    setEditTransferCountsMap({});
+    setEditTransferLoading(true);
+    setFeedback(null);
+    try {
+      const snap = await getDocs(collection(db, 'factoryTransfers', trf.id, 'items'));
+      const nextQty: Record<string, string> = {};
+      const nextCounts: Record<string, Record<string, string>> = {};
+      snap.forEach((d) => {
+        const it = d.data() as FactoryTransferItem;
+        if (!it.productId) return;
+        const q = roundQty(Number(it.sentQty || 0));
+        if (q > 0) {
+          nextQty[it.productId] = String(q);
+          const prod = productMap.get(it.productId);
+          if (prod) {
+            nextCounts[it.productId] = decomposeTotalToUnitCounts(
+              q,
+              getEffectiveProductUnits(prod),
+              it.sentBreakdown
+            );
+          }
+        }
+      });
+      setEditTransferQtyMap(nextQty);
+      setEditTransferCountsMap(nextCounts);
+    } catch (err) {
+      setEditingTransfer(null);
+      setFeedback({
+        type: 'error',
+        text: formatActionError(err, 'تعذر تحميل أصناف التوريد للتعديل.'),
+      });
+    } finally {
+      setEditTransferLoading(false);
+    }
+  };
+
+  const handleSaveEditTransfer = async () => {
+    if (!account || !editingTransfer) return;
     setBusy(true);
     setFeedback(null);
     try {
-      const oldV = preparedMap[corrTarget.id] ? Number(preparedMap[corrTarget.id]) : 0;
-      const newV = Number(corrNewVal);
-      if (Number.isNaN(newV) || newV < 0) throw new Error('يرجى إدخال كمية صحيحة.');
-      await requestReportCorrection(
-        account,
-        report,
-        corrTarget,
-        'preparedQty',
-        oldV,
-        roundQty(newV),
-        corrReason
-      );
-      setCorrTarget(null);
-      setCorrNewVal('');
-      setCorrCounts({});
-      setCorrReason('');
-      setFeedback({ type: 'success', text: 'تم إرسال طلب التصحيح إلى الإدارة العليا للموافقة.' });
+      const items = approvedProducts
+        .map((p) => {
+          const units = getEffectiveProductUnits(p);
+          const counts = editTransferCountsMap[p.id];
+          let qty = 0;
+          let sentBreakdown: UnitBreakdown | undefined;
+
+          if (counts && Object.keys(counts).length > 0) {
+            const summed = sumUnitCounts(units, counts);
+            if (summed.hasInvalid) {
+              throw new Error(`الكمية المدخلة للصنف "${p.name}" غير صالحة.`);
+            }
+            qty = summed.total ?? 0;
+            sentBreakdown = summed.breakdown;
+          } else {
+            const raw = editTransferQtyMap[p.id];
+            if (raw !== undefined && raw !== '') {
+              qty = Number(raw);
+              if (Number.isNaN(qty) || qty < 0) {
+                throw new Error(`الكمية المدخلة للصنف "${p.name}" غير صالحة.`);
+              }
+            }
+          }
+
+          return {
+            product: p,
+            sentQty: roundQty(qty),
+            sentBreakdown,
+          };
+        })
+        .filter((i) => i.sentQty > 0);
+
+      await updateFactoryTransfer(account, editingTransfer, items, editTransferNote);
+      setEditingTransfer(null);
+      setEditTransferQtyMap({});
+      setEditTransferCountsMap({});
+      setEditTransferNote('');
+      setFeedback({
+        type: 'success',
+        text: 'تم تعديل التوريد وتحديث كمياته بنجاح.',
+      });
     } catch (err) {
       setFeedback({
         type: 'error',
-        text: formatActionError(err, 'تعذر إرسال طلب التصحيح.'),
+        text: formatActionError(err, 'تعذر تعديل التوريد.'),
       });
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleConfirmDeleteTransfer = async () => {
+    if (!account || !deletingTransfer) return;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const wasReturn =
+        deletingTransfer.transferType === 'return' || deletingTransfer.status === 'returned';
+      await deleteFactoryTransfer(account, deletingTransfer, products, categories);
+      setDeletingTransfer(null);
+      setFeedback({
+        type: 'success',
+        text: wasReturn
+          ? 'تم حذف إشعار المرتجع وإعادة الكمية إلى رصيد اليوم بنجاح.'
+          : 'تم حذف إشعار التوريد بنجاح.',
+      });
+    } catch (err) {
+      setDeletingTransfer(null);
+      setFeedback({
+        type: 'error',
+        text: formatActionError(err, 'تعذر حذف الإشعار.'),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleExportFactoryTransfersExcel = async () => {
+    if (transfers.length === 0) {
+      setFeedback({ type: 'error', text: 'لا توجد توريدات مسجلة لهذا اليوم لتصديرها.' });
+      return;
+    }
+    setExportingExcel(true);
+    setFeedback(null);
+    try {
+      const sortedTransfers = [...transfers].sort((a, b) =>
+        a.transferNumber.localeCompare(b.transferNumber)
+      );
+      const transferSnapshots = await Promise.all(
+        sortedTransfers.map(async (trf) => {
+          const snap = await getDocs(collection(db, 'factoryTransfers', trf.id, 'items'));
+          return {
+            trf,
+            items: snap.docs.map((d) => d.data() as FactoryTransferItem),
+          };
+        })
+      );
+
+      interface ProductSummaryAgg {
+        productId: string;
+        name: string;
+        categoryName: string;
+        unit: string;
+        sentQty: number;
+        sentBreakdown: UnitBreakdown;
+        receivedQty: number;
+        varianceQty: number;
+        returnedQty: number;
+      }
+
+      const summaryMap = new Map<string, ProductSummaryAgg>();
+      const detailRows: Array<Array<string | number>> = [];
+
+      for (const { trf, items } of transferSnapshots) {
+        const isReturn = trf.transferType === 'return' || trf.status === 'returned';
+        const movementLabel = isReturn ? 'مرتجع من الإنتاج' : 'توريد للإنتاج';
+        const statusLabel = TRANSFER_STATUS_LABELS[trf.status] || trf.status;
+
+        for (const item of items) {
+          const prod = productMap.get(item.productId);
+          const effectiveUnits = getEffectiveProductUnits(prod);
+          const categoryName = prod ? categoryMap.get(prod.categoryId) || '—' : '—';
+          const sentQty = roundQty(Number(item.sentQty || 0));
+          const receivedQty = isReturn
+            ? sentQty
+            : trf.status === 'pending_receipt'
+            ? 0
+            : roundQty(Number(item.receivedQty ?? 0));
+          const varianceQty = isReturn
+            ? 0
+            : trf.status === 'pending_receipt'
+            ? 0
+            : roundQty(Number(item.varianceQty ?? receivedQty - sentQty));
+          const breakdownLabel = formatBreakdownText(item.sentBreakdown, effectiveUnits) || '—';
+
+          detailRows.push([
+            trf.transferNumber,
+            movementLabel,
+            trf.inventoryDate,
+            item.productName || prod?.name || 'صنف غير معروف',
+            categoryName,
+            item.unit || prod?.unit || 'وحدة',
+            sentQty,
+            breakdownLabel,
+            isReturn ? '—' : trf.status === 'pending_receipt' ? 'بانتظار الاستلام' : receivedQty,
+            isReturn ? 0 : trf.status === 'pending_receipt' ? '—' : varianceQty,
+            statusLabel,
+            trf.createdByName || '—',
+            trf.receivedByName || '—',
+            trf.factoryNote || item.note || '—',
+          ]);
+
+          const cur = summaryMap.get(item.productId) || {
+            productId: item.productId,
+            name: item.productName || prod?.name || 'صنف غير معروف',
+            categoryName,
+            unit: item.unit || prod?.unit || 'وحدة',
+            sentQty: 0,
+            sentBreakdown: {},
+            receivedQty: 0,
+            varianceQty: 0,
+            returnedQty: 0,
+          };
+
+          if (isReturn) {
+            cur.returnedQty = roundQty(cur.returnedQty + sentQty);
+          } else {
+            cur.sentQty = roundQty(cur.sentQty + sentQty);
+            cur.receivedQty = roundQty(cur.receivedQty + receivedQty);
+            cur.varianceQty = roundQty(cur.varianceQty + varianceQty);
+            if (item.sentBreakdown) {
+              for (const [uName, uVal] of Object.entries(item.sentBreakdown)) {
+                if (typeof uVal === 'number' && uVal > 0) {
+                  cur.sentBreakdown[uName] = roundQty((cur.sentBreakdown[uName] || 0) + uVal);
+                }
+              }
+            }
+          }
+          summaryMap.set(item.productId, cur);
+        }
+      }
+
+      const summaryRowsList = Array.from(summaryMap.values()).sort((a, b) =>
+        a.name.localeCompare(b.name, 'ar')
+      );
+
+      let totalSentAll = 0;
+      let totalReceivedAll = 0;
+      let totalVarianceAll = 0;
+      let totalReturnedAll = 0;
+      let totalNetAll = 0;
+
+      const summaryTableRows: Array<Array<string | number>> = summaryRowsList.map((row) => {
+        const prod = productMap.get(row.productId);
+        const effectiveUnits = getEffectiveProductUnits(prod);
+        const netExported = Math.max(0, roundQty(row.sentQty - row.returnedQty));
+        totalSentAll = roundQty(totalSentAll + row.sentQty);
+        totalReceivedAll = roundQty(totalReceivedAll + row.receivedQty);
+        totalVarianceAll = roundQty(totalVarianceAll + row.varianceQty);
+        totalReturnedAll = roundQty(totalReturnedAll + row.returnedQty);
+        totalNetAll = roundQty(totalNetAll + netExported);
+
+        return [
+          row.name,
+          row.categoryName,
+          row.unit,
+          row.sentQty,
+          formatBreakdownText(row.sentBreakdown, effectiveUnits) || '—',
+          row.receivedQty,
+          row.varianceQty,
+          row.returnedQty,
+          netExported,
+        ];
+      });
+
+      summaryTableRows.push([
+        'الإجمالي الكلي',
+        '',
+        '',
+        totalSentAll,
+        '',
+        totalReceivedAll,
+        totalVarianceAll,
+        totalReturnedAll,
+        totalNetAll,
+      ]);
+
+      const dateLabel = currentSession?.inventoryDate || 'اليوم';
+      const wb = XLSX.utils.book_new();
+
+      const summarySheetData = [
+        ['شركة مطاعم المذاق اليمني — تقرير المعمل لما تم تصديره للإنتاج'],
+        [
+          `تاريخ الجرد: ${dateLabel}`,
+          `عدد إشعارات التوريد: ${dispatchTransfers.length}`,
+          `عدد إشعارات المرتجع: ${returnTransfers.length}`,
+        ],
+        [],
+        [
+          'الصنف',
+          'المجموعة',
+          'الوحدة',
+          'إجمالي المرسل للإنتاج',
+          'تفصيل وحدات المرسل',
+          'المستلم بالإنتاج',
+          'فرق التسليم',
+          'المرتجع للمعمل',
+          'صافي المرحّل للإنتاج',
+        ],
+        ...summaryTableRows,
+      ];
+      const wsSummary = XLSX.utils.aoa_to_sheet(summarySheetData);
+      wsSummary['!views'] = [{ rightToLeft: true }];
+      wsSummary['!cols'] = [
+        { wch: 24 },
+        { wch: 16 },
+        { wch: 12 },
+        { wch: 18 },
+        { wch: 24 },
+        { wch: 16 },
+        { wch: 14 },
+        { wch: 16 },
+        { wch: 18 },
+      ];
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'ملخص المرسل للإنتاج');
+
+      const detailSheetData = [
+        ['شركة مطاعم المذاق اليمني — تفاصيل إشعارات توريد المعمل للإنتاج'],
+        [`تاريخ الجرد: ${dateLabel}`],
+        [],
+        [
+          'رقم الإشعار',
+          'نوع الحركة',
+          'التاريخ',
+          'الصنف',
+          'المجموعة',
+          'الوحدة',
+          'الكمية المرسلة',
+          'تفصيل الوحدات',
+          'الكمية المستلمة',
+          'الفرق',
+          'الحالة',
+          'المرسل',
+          'المستلم',
+          'ملاحظة',
+        ],
+        ...detailRows,
+      ];
+      const wsDetails = XLSX.utils.aoa_to_sheet(detailSheetData);
+      wsDetails['!views'] = [{ rightToLeft: true }];
+      wsDetails['!cols'] = [
+        { wch: 18 },
+        { wch: 16 },
+        { wch: 13 },
+        { wch: 22 },
+        { wch: 15 },
+        { wch: 11 },
+        { wch: 14 },
+        { wch: 22 },
+        { wch: 16 },
+        { wch: 12 },
+        { wch: 16 },
+        { wch: 18 },
+        { wch: 18 },
+        { wch: 26 },
+      ];
+      XLSX.utils.book_append_sheet(wb, wsDetails, 'تفاصيل الإشعارات');
+
+      XLSX.writeFile(wb, `تقرير_توريدات_المعمل_للإنتاج_${dateLabel}.xlsx`);
+      setFeedback({
+        type: 'success',
+        text: 'تم تصدير تقرير المعمل (ما تم تصديره للإنتاج) إلى ملف إكسل بنجاح.',
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: formatActionError(err, 'تعذر تصدير تقرير المعمل إلى إكسل.'),
+      });
+    } finally {
+      setExportingExcel(false);
     }
   };
 
@@ -677,6 +1033,17 @@ export const FactoryWorkspace: React.FC = () => {
               tone={report.status === 'draft' ? 'warning' : 'success'}
               icon={report.status === 'draft' ? 'clock' : 'check'}
             />
+          )}
+          {transfers.length > 0 && (
+            <button
+              type="button"
+              disabled={exportingExcel}
+              onClick={() => void handleExportFactoryTransfersExcel()}
+              className="min-h-[42px] inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs font-bold text-emerald-900 hover:bg-emerald-100 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <FileSpreadsheet className="h-4 w-4 text-emerald-700" />
+              <span>{exportingExcel ? 'جاري التصدير...' : 'تصدير إكسل (المرسل للإنتاج)'}</span>
+            </button>
           )}
           {!isDeptQtyReadOnly && (
             <button
@@ -954,6 +1321,31 @@ export const FactoryWorkspace: React.FC = () => {
                       وقت الإرسال: {formatTimestampAden(trf.createdAt)}
                       {trf.receivedByName ? ` · المستلم: ${trf.receivedByName}` : ''}
                     </div>
+                    {trf.factoryNote && (
+                      <div className="text-xs text-zinc-600">{trf.factoryNote}</div>
+                    )}
+                    {!isDeptQtyReadOnly && !isSessionClosed && trf.status === 'pending_receipt' && (
+                      <div className="pt-2 border-t border-zinc-100 flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void openEditTransferModal(trf)}
+                          className="min-h-[34px] inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1 text-xs font-semibold text-zinc-800 hover:bg-zinc-100 cursor-pointer disabled:opacity-50"
+                        >
+                          <Edit3 className="h-3.5 w-3.5" />
+                          <span>تعديل</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => setDeletingTransfer(trf)}
+                          className="min-h-[34px] inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-100 cursor-pointer disabled:opacity-50"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>حذف</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1139,6 +1531,19 @@ export const FactoryWorkspace: React.FC = () => {
                     <div className="text-[11px] text-zinc-400">
                       وقت السحب: {formatTimestampAden(trf.createdAt)} · بواسطة: {trf.createdByName}
                     </div>
+                    {!isDeptQtyReadOnly && !isSessionClosed && (
+                      <div className="pt-2 border-t border-zinc-100 flex items-center justify-end">
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => setDeletingTransfer(trf)}
+                          className="min-h-[34px] inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-100 cursor-pointer disabled:opacity-50"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>حذف المرتجع</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1159,7 +1564,7 @@ export const FactoryWorkspace: React.FC = () => {
                 اترك الحقل فارغاً للأصناف التي لم تجهز اليوم، أو أدخل 0 إذا كانت الكمية صفراً فعلياً
               </p>
             </div>
-            {!isDeptQtyReadOnly && !isSubmitted && !isSessionClosed && (
+            {!isDeptQtyReadOnly && !isSessionClosed && (
               <div className="flex flex-wrap items-center gap-2">
                 {transfers.length > 0 && (
                   <button
@@ -1172,24 +1577,38 @@ export const FactoryWorkspace: React.FC = () => {
                     <span>تعبئة من التوريدات المرسلة</span>
                   </button>
                 )}
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void handleSaveDraft()}
-                  className="min-h-[42px] inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer"
-                >
-                  <Save className="h-4 w-4" />
-                  <span>حفظ كمسودة</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={busy || enteredPreparedCount === 0}
-                  onClick={() => setConfirmSubmitOpen(true)}
-                  className="min-h-[42px] inline-flex items-center gap-2 rounded-xl bg-[#D91B23] px-4 py-2 text-xs font-bold text-white hover:bg-[#B9141B] cursor-pointer disabled:opacity-50"
-                >
-                  <Send className="h-4 w-4" />
-                  <span>ترحيل تقرير المعمل</span>
-                </button>
+                {!isSubmitted ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void handleSaveDraft()}
+                      className="min-h-[42px] inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+                    >
+                      <Save className="h-4 w-4" />
+                      <span>حفظ كمسودة</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || enteredPreparedCount === 0}
+                      onClick={() => setConfirmSubmitOpen(true)}
+                      className="min-h-[42px] inline-flex items-center gap-2 rounded-xl bg-[#D91B23] px-4 py-2 text-xs font-bold text-white hover:bg-[#B9141B] cursor-pointer disabled:opacity-50"
+                    >
+                      <Send className="h-4 w-4" />
+                      <span>ترحيل تقرير المعمل</span>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy || enteredPreparedCount === 0}
+                    onClick={() => void handleSubmitReport()}
+                    className="min-h-[42px] inline-flex items-center gap-2 rounded-xl bg-[#D91B23] px-4 py-2 text-xs font-bold text-white hover:bg-[#B9141B] cursor-pointer disabled:opacity-50"
+                  >
+                    <Save className="h-4 w-4" />
+                    <span>{busy ? 'جاري التحديث...' : 'حفظ وتحديث التقرير المرحّل'}</span>
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -1202,9 +1621,6 @@ export const FactoryWorkspace: React.FC = () => {
                   <th className="px-4 py-3 font-semibold">المجموعة</th>
                   <th className="px-4 py-3 font-semibold">الوحدة</th>
                   <th className="px-4 py-3 font-semibold">الكمية المجهزة</th>
-                  {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
-                    <th className="px-4 py-3 font-semibold">تصحيح</th>
-                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100 text-sm">
@@ -1236,7 +1652,7 @@ export const FactoryWorkspace: React.FC = () => {
                         counts={counts}
                         totalValue={totalStr}
                         readOnly={isDeptQtyReadOnly}
-                        disabled={isSubmitted || isSessionClosed}
+                        disabled={isSessionClosed}
                         placeholder="لم يُدخل"
                         onChange={(nextCounts, nextTotalStr) => {
                           setPreparedCountsMap((prev) => ({ ...prev, [prod.id]: nextCounts }));
@@ -1244,25 +1660,6 @@ export const FactoryWorkspace: React.FC = () => {
                         }}
                       />
                     </td>
-                    {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
-                      <td className="px-4 py-3">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const initVal = preparedMap[prod.id] ?? '0';
-                            setCorrTarget(prod);
-                            setCorrNewVal(initVal);
-                            setCorrCounts(
-                              decomposeTotalToUnitCounts(Number(initVal || 0), effectiveUnits)
-                            );
-                          }}
-                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer"
-                        >
-                          <Edit3 className="h-3.5 w-3.5" />
-                          <span>طلب تصحيح</span>
-                        </button>
-                      </td>
-                    )}
                   </tr>
                   );
                 })}
@@ -1377,12 +1774,32 @@ export const FactoryWorkspace: React.FC = () => {
       <ConfirmDialog
         open={confirmSubmitOpen}
         title="تأكيد ترحيل تقرير المعمل"
-        description="بعد الترحيل لا يمكن تعديل الكميات مباشرة، وأي تعديل يتطلب موافقة الإدارة العليا."
-        confirmLabel="ترحيل التقرير نهائياً"
-        variant="danger"
+        description="سيتم ترحيل تقرير الكميات المجهزة بالمعمل واعتماده في حسابات اليوم، ويمكن للمعمل تعديله وتحديثه مباشرة في أي وقت قبل إغلاق اليوم."
+        confirmLabel="ترحيل التقرير"
         busy={busy}
         onConfirm={() => void handleSubmitReport()}
         onCancel={() => setConfirmSubmitOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deletingTransfer)}
+        title={
+          deletingTransfer?.transferType === 'return' || deletingTransfer?.status === 'returned'
+            ? 'تأكيد حذف إشعار المرتجع'
+            : 'تأكيد حذف إشعار التوريد'
+        }
+        description={
+          deletingTransfer
+            ? deletingTransfer.transferType === 'return' || deletingTransfer.status === 'returned'
+              ? `سيتم حذف إشعار المرتجع (${deletingTransfer.transferNumber}) وإرجاع كميته (${deletingTransfer.totalSentQty}) إلى صافي الكمية المرحلة لليوم.`
+              : `سيتم حذف إشعار التوريد (${deletingTransfer.transferNumber}) بإجمالي ${deletingTransfer.totalSentQty} وحدة نهائياً قبل استلامه.`
+            : ''
+        }
+        confirmLabel="حذف الإشعار"
+        variant="danger"
+        busy={busy}
+        onConfirm={() => void handleConfirmDeleteTransfer()}
+        onCancel={() => setDeletingTransfer(null)}
       />
 
       {newProdModal && (
@@ -1476,52 +1893,127 @@ export const FactoryWorkspace: React.FC = () => {
         </div>
       )}
 
-      {corrTarget && (
+      {editingTransfer && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white border border-zinc-200 p-6 space-y-4">
-            <h3 className="text-lg font-bold text-zinc-900 font-display">
-              طلب تصحيح بعد الترحيل — {corrTarget.name}
-            </h3>
-            <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1.5">الكمية الجديدة</label>
-              <MultiUnitQtyInput
-                product={corrTarget}
-                counts={corrCounts}
-                totalValue={corrNewVal}
-                fullWidth
-                onChange={(nextCounts, nextTotalStr) => {
-                  setCorrCounts(nextCounts);
-                  setCorrNewVal(nextTotalStr);
-                }}
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1">سبب التعديل</label>
-              <textarea
-                rows={2}
-                value={corrReason}
-                onChange={(e) => setCorrReason(e.target.value)}
-                placeholder="اذكر سبب التصحيح لتوثيقه في سجل التدقيق..."
-                className="w-full rounded-xl border border-zinc-200 p-3 text-sm"
-              />
-            </div>
-            <div className="flex justify-end gap-2">
+          <div className="w-full max-w-2xl rounded-2xl bg-white border border-zinc-200 overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold text-zinc-900 font-display">
+                  تعديل إشعار التوريد — <span className="font-mono">{editingTransfer.transferNumber}</span>
+                </h3>
+                <p className="text-xs text-zinc-500">
+                  عدّل الكميات أو الملاحظة قبل تأكيد الاستلام من قسم الإنتاج
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => setCorrTarget(null)}
-                className="min-h-[40px] px-4 rounded-xl border border-zinc-200 text-xs font-semibold text-zinc-700 cursor-pointer"
+                onClick={() => setEditingTransfer(null)}
+                className="h-8 w-8 inline-flex items-center justify-center rounded-lg border border-zinc-200 text-zinc-500 hover:bg-zinc-50 cursor-pointer"
               >
-                إلغاء
-              </button>
-              <button
-                type="button"
-                disabled={busy || !corrReason.trim()}
-                onClick={() => void handleRequestCorrection()}
-                className="min-h-[40px] px-5 rounded-xl bg-[#D91B23] text-xs font-bold text-white cursor-pointer disabled:opacity-50"
-              >
-                إرسال الطلب للإدارة
+                <X className="h-4 w-4" />
               </button>
             </div>
+
+            {editTransferLoading ? (
+              <div className="p-8 text-center text-sm text-zinc-500">
+                جاري تحميل تفاصيل الإشعار...
+              </div>
+            ) : (
+              <>
+                <div className="overflow-y-auto flex-1">
+                  <table className="w-full text-right">
+                    <thead className="bg-zinc-50 border-b border-zinc-200 text-xs text-zinc-500 sticky top-0 z-10">
+                      <tr>
+                        <th className="px-5 py-3 font-semibold">الصنف</th>
+                        <th className="px-4 py-3 font-semibold">الوحدة</th>
+                        <th className="px-4 py-3 font-semibold text-center">الكمية المرسلة</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-100 text-sm">
+                      {approvedProducts.map((prod) => {
+                        const effectiveUnits = getEffectiveProductUnits(prod);
+                        const totalStr = editTransferQtyMap[prod.id] || '';
+                        const counts =
+                          editTransferCountsMap[prod.id] ??
+                          (totalStr !== ''
+                            ? decomposeTotalToUnitCounts(Number(totalStr), effectiveUnits)
+                            : {});
+                        return (
+                          <tr key={prod.id} className="hover:bg-zinc-50/70">
+                            <td className="px-5 py-3">
+                              <div className="font-semibold text-zinc-900">{prod.name}</div>
+                              <div className="text-[11px] text-zinc-500">
+                                {categoryMap.get(prod.categoryId) || '—'}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-xs font-semibold text-zinc-700">
+                              {prod.unit}
+                            </td>
+                            <td className="px-4 py-3">
+                              <MultiUnitQtyInput
+                                product={prod}
+                                counts={counts}
+                                totalValue={totalStr}
+                                disabled={busy}
+                                onChange={(nextCounts, nextTotalStr) => {
+                                  setEditTransferCountsMap((prev) => ({
+                                    ...prev,
+                                    [prod.id]: nextCounts,
+                                  }));
+                                  setEditTransferQtyMap((prev) => ({
+                                    ...prev,
+                                    [prod.id]: nextTotalStr,
+                                  }));
+                                }}
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="p-5 border-t border-zinc-100 bg-zinc-50/60 space-y-3">
+                  <input
+                    type="text"
+                    value={editTransferNote}
+                    onChange={(e) => setEditTransferNote(e.target.value)}
+                    placeholder="ملاحظة التوريد (اختياري)..."
+                    className="w-full min-h-[42px] rounded-xl border border-zinc-200 bg-white px-4 text-sm focus:outline-none focus:border-[#D91B23]"
+                  />
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-zinc-600 tabular-nums">
+                      الإجمالي الجديد:{' '}
+                      {roundQty(
+                        Object.values(editTransferQtyMap).reduce(
+                          (sum, v) => sum + (Number(v) > 0 ? Number(v) : 0),
+                          0
+                        )
+                      )}{' '}
+                      وحدة
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditingTransfer(null)}
+                        className="min-h-[40px] px-4 rounded-xl border border-zinc-200 bg-white text-xs font-semibold text-zinc-700 cursor-pointer"
+                      >
+                        إلغاء
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void handleSaveEditTransfer()}
+                        className="min-h-[40px] px-5 rounded-xl bg-[#D91B23] text-xs font-bold text-white hover:bg-[#B9141B] cursor-pointer disabled:opacity-50"
+                      >
+                        {busy ? 'جاري الحفظ...' : 'حفظ تعديلات التوريد'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

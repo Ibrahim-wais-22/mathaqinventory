@@ -14,6 +14,7 @@ import {
 import {
   BOOTSTRAP_ADMIN_EMAIL,
   DEFAULT_BRANCH_ID,
+  DEPARTMENT_LABELS,
   getDepartmentForRole,
   getDefaultPermissionsForRole,
 } from '../../constants/departments';
@@ -37,7 +38,7 @@ import type {
   UserInvite,
   UserRole,
 } from '../../types/inventory';
-import { getPreviousAdenDate, makeSessionId } from '../../utils/dateAden';
+import { getPreviousAdenDate, makeSessionId, shiftIsoDate } from '../../utils/dateAden';
 import {
   hashPassword,
   normalizePhoneForPassword,
@@ -898,7 +899,9 @@ export async function saveDepartmentReportDraft(
     note?: string;
   }>
 ): Promise<void> {
-  if (report.status !== 'draft') {
+  const canEditSubmittedFactory =
+    report.department === 'factory' && report.status === 'submitted';
+  if (report.status !== 'draft' && !canEditSubmittedFactory) {
     throw new Error('لا يمكن تعديل تقرير تم ترحيله بالفعل. يمكنك تقديم طلب تصحيح إداري.');
   }
 
@@ -996,7 +999,8 @@ export async function submitDepartmentReport(
   report: DepartmentReport,
   enteredCount: number
 ): Promise<void> {
-  if (report.status !== 'draft') {
+  const isFactoryReupdate = report.department === 'factory' && report.status === 'submitted';
+  if (report.status !== 'draft' && !isFactoryReupdate) {
     throw new Error('تم ترحيل هذا التقرير مسبقاً.');
   }
   if (enteredCount <= 0) {
@@ -1011,19 +1015,22 @@ export async function submitDepartmentReport(
       itemCount: enteredCount,
       submittedBy: actor.uid,
       submittedByName: actorName,
+      ...(isFactoryReupdate
+        ? { lastCorrectionReason: 'تحديث مباشر من المعمل قبل إغلاق اليوم' }
+        : {}),
       updatedAt: serverTimestamp(),
     });
 
     await appendAuditLog({
       actor,
-      action: 'ترحيل_تقرير_إدارة',
+      action: isFactoryReupdate ? 'تحديث_تقرير_المعمل_المفتوح' : 'ترحيل_تقرير_إدارة',
       targetCollection: 'departmentReports',
       targetId: report.id,
       sessionId: report.sessionId,
       inventoryDate: report.inventoryDate,
       branchId: report.branchId,
       department: report.department,
-      newValueSummary: `ترحيل تقرير ${report.department} (${enteredCount} صنف)`,
+      newValueSummary: `${isFactoryReupdate ? 'تحديث' : 'ترحيل'} تقرير ${report.department} (${enteredCount} صنف)`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `departmentReports/${report.id}`);
@@ -1107,6 +1114,142 @@ export async function createFactoryTransfer(
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `factoryTransfers/${transferId}`);
+  }
+}
+
+export async function updateFactoryTransfer(
+  actor: UserAccount,
+  transfer: FactoryTransfer,
+  items: Array<{ product: Product; sentQty: number; sentBreakdown?: UnitBreakdown; note?: string }>,
+  factoryNote: string
+): Promise<void> {
+  if (transfer.status !== 'pending_receipt' && transfer.status !== 'returned') {
+    throw new Error('لا يمكن تعديل توريد تم تأكيد استلامه بالفعل من قسم الإنتاج.');
+  }
+  for (const i of items) {
+    if (Number.isNaN(i.sentQty) || i.sentQty < 0) {
+      throw new Error(`الكمية للصنف "${i.product.name}" غير صالحة.`);
+    }
+  }
+  const validItems = items.filter((i) => i.sentQty > 0);
+  if (validItems.length === 0) {
+    throw new Error('لا يمكن حفظ إشعار فارغ. أدخل كمية أكبر من صفر أو احذف الإشعار.');
+  }
+
+  const isReturn = transfer.status === 'returned' || transfer.transferType === 'return';
+  const totalSentQty = roundQty(validItems.reduce((acc, i) => acc + safeNum(i.sentQty), 0));
+  const existingItemsSnap = await getDocs(
+    collection(db, 'factoryTransfers', transfer.id, 'items')
+  );
+  const existingCreatedAt = new Map<string, unknown>();
+  existingItemsSnap.forEach((d) => {
+    existingCreatedAt.set(d.id, d.data().createdAt);
+  });
+
+  const keepIds = new Set(validItems.map((i) => i.product.id));
+  const batch = writeBatch(db);
+
+  existingItemsSnap.forEach((d) => {
+    if (!keepIds.has(d.id)) {
+      batch.delete(d.ref);
+    }
+  });
+
+  for (const item of validItems) {
+    const cleanBreakdown = sanitizeUnitBreakdown(item.sentBreakdown);
+    const cleanQty = safeNum(item.sentQty);
+    const itemRef = doc(db, 'factoryTransfers', transfer.id, 'items', item.product.id);
+    const prevCreated = existingCreatedAt.get(item.product.id);
+    batch.set(itemRef, {
+      transferId: transfer.id,
+      sessionId: transfer.sessionId,
+      productId: item.product.id,
+      productName: item.product.name.slice(0, 140),
+      unit: item.product.unit.slice(0, 40),
+      sentQty: cleanQty,
+      sentBreakdown: cleanBreakdown ?? null,
+      receivedQty: isReturn ? cleanQty : null,
+      receivedBreakdown: isReturn ? (cleanBreakdown ?? null) : null,
+      varianceQty: isReturn ? 0 : null,
+      note: (item.note || '').slice(0, 300),
+      createdAt: prevCreated || serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  batch.update(doc(db, 'factoryTransfers', transfer.id), {
+    totalSentQty,
+    ...(isReturn ? { totalReceivedQty: totalSentQty } : {}),
+    factoryNote: factoryNote.trim().slice(0, 400),
+    updatedAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+    await appendAuditLog({
+      actor,
+      action: isReturn ? 'تعديل_مرتجع_معمل' : 'تعديل_توريد_معمل',
+      targetCollection: 'factoryTransfers',
+      targetId: transfer.id,
+      sessionId: transfer.sessionId,
+      inventoryDate: transfer.inventoryDate,
+      branchId: transfer.branchId,
+      department: 'factory',
+      oldValueSummary: `${transfer.transferNumber}: ${transfer.totalSentQty} وحدة`,
+      newValueSummary: `${transfer.transferNumber}: ${totalSentQty} وحدة`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `factoryTransfers/${transfer.id}`);
+  }
+}
+
+export async function deleteFactoryTransfer(
+  actor: UserAccount,
+  transfer: FactoryTransfer,
+  products?: Product[],
+  categories?: Category[]
+): Promise<void> {
+  if (transfer.status !== 'pending_receipt' && transfer.status !== 'returned') {
+    throw new Error('لا يمكن حذف توريد تم تأكيد استلامه بالفعل من قسم الإنتاج.');
+  }
+
+  const isReturn = transfer.status === 'returned' || transfer.transferType === 'return';
+  const itemsSnap = await getDocs(collection(db, 'factoryTransfers', transfer.id, 'items'));
+  const batch = writeBatch(db);
+  itemsSnap.forEach((d) => batch.delete(d.ref));
+  batch.delete(doc(db, 'factoryTransfers', transfer.id));
+
+  try {
+    await batch.commit();
+    await appendAuditLog({
+      actor,
+      action: isReturn ? 'حذف_مرتجع_معمل' : 'حذف_توريد_معمل',
+      targetCollection: 'factoryTransfers',
+      targetId: transfer.id,
+      sessionId: transfer.sessionId,
+      inventoryDate: transfer.inventoryDate,
+      branchId: transfer.branchId,
+      department: 'factory',
+      oldValueSummary: `${transfer.transferNumber}: ${transfer.totalSentQty} وحدة`,
+    });
+
+    const isActorAdmin =
+      actor.role === 'ceo' ||
+      actor.role === 'branch_manager' ||
+      actor.email.toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
+    if (isActorAdmin && products && categories && products.length > 0 && categories.length > 0) {
+      const sessSnap = await getDoc(doc(db, 'dailySessions', transfer.sessionId));
+      if (sessSnap.exists()) {
+        await recalculateSessionResults(
+          actor,
+          { id: sessSnap.id, ...(sessSnap.data() as Omit<DailySession, 'id'>) },
+          products,
+          categories
+        );
+      }
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `factoryTransfers/${transfer.id}`);
   }
 }
 
@@ -1434,7 +1577,8 @@ export async function recalculateSessionResults(
   try {
     const categoryMap = new Map(categories.map((c) => [c.id, c.name]));
 
-    // 1. Opening balance: strictly from previous CLOSED session's validRemainingQty
+    // 1. Opening balance: finalized from previous CLOSED session's validRemainingQty,
+    // or live-previewed from previous unclosed session's waste report / productResults for pre-close matching.
     const openingMap = new Map<string, number>();
     const prevDate = getPreviousAdenDate(session.inventoryDate);
     const prevSessionId = makeSessionId(session.branchId, prevDate);
@@ -1448,6 +1592,39 @@ export async function recalculateSessionResults(
         const data = d.data() as ProductResult;
         openingMap.set(data.productId, safeNum(data.validRemainingQty));
       });
+
+      const isActorAdmin =
+        actor.role === 'ceo' ||
+        actor.role === 'branch_manager' ||
+        actor.email.toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
+      if (isActorAdmin && !session.openingBalanceApproved && session.status !== 'closed') {
+        await updateDoc(doc(db, 'dailySessions', session.id), {
+          openingBalanceApproved: true,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } else {
+      try {
+        const prevResultsSnap = await getDocs(
+          query(collection(db, 'productResults'), where('sessionId', '==', prevSessionId))
+        );
+        prevResultsSnap.forEach((d) => {
+          const data = d.data() as ProductResult;
+          openingMap.set(data.productId, safeNum(data.validRemainingQty));
+        });
+
+        const prevWasteItemsSnap = await getDocs(
+          collection(db, 'departmentReports', sanitizeId(`${prevSessionId}_waste`), 'items')
+        );
+        prevWasteItemsSnap.forEach((d) => {
+          const item = d.data() as DepartmentReportItem;
+          if (item.validRemainingQty !== null && item.validRemainingQty !== undefined) {
+            openingMap.set(item.productId, safeNum(item.validRemainingQty));
+          }
+        });
+      } catch {
+        // Ignore if actor cannot read previous unclosed waste items
+      }
     }
 
     // 2. Factory transfers & same-day returns for this session
@@ -1624,8 +1801,32 @@ export async function closeDailySession(
     batch.update(d.ref, { isFinalized: true, updatedAt: serverTimestamp() });
   });
 
+  // If the next day's session already exists, mark its opening balance as approved so it receives carried-over validRemainingQty
+  const nextDate = shiftIsoDate(session.inventoryDate, 1);
+  const nextSessionId = makeSessionId(session.branchId, nextDate);
+  const nextSessionRef = doc(db, 'dailySessions', nextSessionId);
+  const nextSessionSnap = await getDoc(nextSessionRef);
+  if (nextSessionSnap.exists()) {
+    batch.update(nextSessionRef, {
+      openingBalanceApproved: true,
+      updatedAt: serverTimestamp(),
+    });
+  }
+
   try {
     await batch.commit();
+
+    if (nextSessionSnap.exists()) {
+      const nextSessionData = {
+        id: nextSessionSnap.id,
+        ...(nextSessionSnap.data() as Omit<DailySession, 'id'>),
+        openingBalanceApproved: true,
+      };
+      if (nextSessionData.status !== 'closed') {
+        await recalculateSessionResults(actor, nextSessionData, products, categories);
+      }
+    }
+
     await appendAuditLog({
       actor,
       action: 'إغلاق_يوم_الجرد',
@@ -1636,7 +1837,7 @@ export async function closeDailySession(
       branchId: session.branchId,
       department: 'management',
       reason: decisionNote,
-      newValueSummary: 'تم إغلاق اليوم واعتماد نقل المتبقي الصالح فقط',
+      newValueSummary: 'تم إغلاق اليوم واعتماد نقل المتبقي الصالح فقط لليوم التالي',
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `dailySessions/${session.id}`);
@@ -1678,6 +1879,17 @@ export async function reopenDailySession(
     batch.update(d.ref, { isFinalized: false, updatedAt: serverTimestamp() });
   });
 
+  const nextDate = shiftIsoDate(session.inventoryDate, 1);
+  const nextSessionId = makeSessionId(session.branchId, nextDate);
+  const nextSessionRef = doc(db, 'dailySessions', nextSessionId);
+  const nextSessionSnap = await getDoc(nextSessionRef);
+  if (nextSessionSnap.exists()) {
+    batch.update(nextSessionRef, {
+      openingBalanceApproved: false,
+      updatedAt: serverTimestamp(),
+    });
+  }
+
   try {
     await batch.commit();
     await appendAuditLog({
@@ -1694,6 +1906,253 @@ export async function reopenDailySession(
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `dailySessions/${session.id}`);
+  }
+}
+
+export async function transferDepartmentReportBetweenDates(
+  actor: UserAccount,
+  branchId: string,
+  department: OperationalDepartmentId,
+  sourceDate: string,
+  targetDate: string,
+  reason: string,
+  products: Product[],
+  categories: Category[]
+): Promise<{ movedItemsCount: number }> {
+  const isActorAdmin =
+    actor.role === 'ceo' ||
+    actor.role === 'branch_manager' ||
+    actor.email.toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
+  if (!isActorAdmin) {
+    throw new Error('عملية نقل التقارير بين التواريخ مقصورة على الإدارة العليا فقط.');
+  }
+  if (!sourceDate || !targetDate) {
+    throw new Error('يرجى تحديد تاريخ المصدر وتاريخ الوجهة.');
+  }
+  if (sourceDate === targetDate) {
+    throw new Error('يجب أن يكون تاريخ الوجهة مختلفاً عن تاريخ المصدر.');
+  }
+  if (!reason.trim()) {
+    throw new Error('يرجى كتابة سبب نقل التقرير لتوثيقه في سجل التدقيق.');
+  }
+
+  try {
+    const sourceSession = await ensureDailySession(actor, branchId, sourceDate);
+    const targetSession = await ensureDailySession(actor, branchId, targetDate);
+
+    const sourceReportId = sanitizeId(`${sourceSession.id}_${department}`);
+    const targetReportId = sanitizeId(`${targetSession.id}_${department}`);
+    const sourceReportRef = doc(db, 'departmentReports', sourceReportId);
+    const targetReportRef = doc(db, 'departmentReports', targetReportId);
+
+    const sourceReportSnap = await getDoc(sourceReportRef);
+    const sourceItemsSnap = await getDocs(collection(db, 'departmentReports', sourceReportId, 'items'));
+    const sourceProdEntriesSnap =
+      department === 'production'
+        ? await getDocs(
+            query(collection(db, 'productionEntries'), where('sessionId', '==', sourceSession.id))
+          )
+        : null;
+
+    const hasReportItems = sourceItemsSnap.size > 0;
+    const hasProdEntries = !!sourceProdEntriesSnap && sourceProdEntriesSnap.size > 0;
+    if (!sourceReportSnap.exists() || (!hasReportItems && !hasProdEntries)) {
+      throw new Error(
+        `لا توجد بيانات مدخلة في قسم ${DEPARTMENT_LABELS[department]} بتاريخ ${sourceDate} لنقلها.`
+      );
+    }
+
+    const sourceReportData = sourceReportSnap.data() as Omit<DepartmentReport, 'id'>;
+
+    // Reopen closed sessions cleanly if either side was closed
+    if (sourceSession.status === 'closed') {
+      const srcReportsSnap = await getDocs(
+        query(collection(db, 'departmentReports'), where('sessionId', '==', sourceSession.id))
+      );
+      const srcReps = srcReportsSnap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<DepartmentReport, 'id'>),
+      }));
+      await reopenDailySession(
+        actor,
+        sourceSession,
+        srcReps,
+        `إعادة فتح تلقائية لنقل تقرير ${DEPARTMENT_LABELS[department]} إلى ${targetDate}: ${reason.trim()}`
+      );
+    }
+
+    if (targetSession.status === 'closed') {
+      const tgtReportsSnap = await getDocs(
+        query(collection(db, 'departmentReports'), where('sessionId', '==', targetSession.id))
+      );
+      const tgtReps = tgtReportsSnap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<DepartmentReport, 'id'>),
+      }));
+      await reopenDailySession(
+        actor,
+        targetSession,
+        tgtReps,
+        `إعادة فتح تلقائية لاستقبال تقرير ${DEPARTMENT_LABELS[department]} المنقول من ${sourceDate}: ${reason.trim()}`
+      );
+    }
+
+    // Ensure target report document exists as draft before batching updates/items
+    const existingTargetReportSnap = await getDoc(targetReportRef);
+    if (!existingTargetReportSnap.exists()) {
+      await setDoc(targetReportRef, {
+        sessionId: targetSession.id,
+        branchId: targetSession.branchId,
+        inventoryDate: targetDate,
+        department,
+        status: 'draft',
+        itemCount: 0,
+        createdBy: actor.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    const existingTargetItemsSnap = await getDocs(
+      collection(db, 'departmentReports', targetReportId, 'items')
+    );
+
+    const actorName = (actor.fullName || actor.username || 'الإدارة').trim().slice(0, 120);
+    const reasonClean = reason.trim().slice(0, 500);
+    const movedStatus: DepartmentReport['status'] =
+      sourceReportData.status === 'closed' ? 'submitted' : sourceReportData.status;
+
+    const batch = writeBatch(db);
+
+    // Clear stale items in target report
+    existingTargetItemsSnap.forEach((d) => {
+      batch.delete(d.ref);
+    });
+
+    // Move items from source -> target
+    let movedCount = 0;
+    sourceItemsSnap.forEach((d) => {
+      const item = d.data() as DepartmentReportItem;
+      const destRef = doc(db, 'departmentReports', targetReportId, 'items', item.productId);
+      const nextPayload: Record<string, unknown> = {
+        reportId: targetReportId,
+        sessionId: targetSession.id,
+        branchId: targetSession.branchId,
+        inventoryDate: targetDate,
+        department,
+        productId: item.productId,
+        categoryId: item.categoryId,
+        updatedBy: actor.uid,
+        updatedByName: actorName,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      if (item.preparedQty !== undefined) nextPayload.preparedQty = item.preparedQty;
+      if (item.independentProductionQty !== undefined)
+        nextPayload.independentProductionQty = item.independentProductionQty;
+      if (item.salesQty !== undefined) nextPayload.salesQty = item.salesQty;
+      if (item.damagedQty !== undefined) nextPayload.damagedQty = item.damagedQty;
+      if (item.validRemainingQty !== undefined)
+        nextPayload.validRemainingQty = item.validRemainingQty;
+      if (item.invalidRemainingQty !== undefined)
+        nextPayload.invalidRemainingQty = item.invalidRemainingQty;
+      if (item.unitBreakdowns !== undefined) nextPayload.unitBreakdowns = item.unitBreakdowns;
+      if (item.note !== undefined) nextPayload.note = item.note;
+
+      batch.set(destRef, nextPayload);
+      batch.delete(d.ref);
+      movedCount += 1;
+    });
+
+    // If production, move independent productionEntries as well
+    if (department === 'production' && sourceProdEntriesSnap) {
+      sourceProdEntriesSnap.forEach((d) => {
+        const entry = d.data() as ProductionEntry;
+        const newEntryRef = doc(collection(db, 'productionEntries'), makeUniqueId('ind'));
+        batch.set(newEntryRef, {
+          sessionId: targetSession.id,
+          branchId: targetSession.branchId,
+          inventoryDate: targetDate,
+          productId: entry.productId,
+          qty: safeNum(entry.qty),
+          unitBreakdown: entry.unitBreakdown ?? null,
+          note: (entry.note || `منقول من ${sourceDate}`).slice(0, 300),
+          createdBy: actor.uid,
+          createdByName: actorName,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        batch.delete(d.ref);
+      });
+    }
+
+    // Update target report header
+    batch.update(targetReportRef, {
+      status: movedStatus,
+      itemCount: sourceReportData.itemCount || movedCount,
+      submittedBy: sourceReportData.submittedBy ?? (movedStatus === 'draft' ? null : actor.uid),
+      submittedByName:
+        sourceReportData.submittedByName ?? (movedStatus === 'draft' ? null : actorName),
+      approvedBy: actor.uid,
+      approvedByName: actorName,
+      lastCorrectionReason: `منقول من ${sourceDate}: ${reasonClean}`.slice(0, 500),
+      updatedAt: serverTimestamp(),
+    });
+
+    // Reset source report header to clean draft
+    batch.update(sourceReportRef, {
+      status: 'draft',
+      itemCount: 0,
+      submittedBy: null,
+      submittedByName: null,
+      approvedBy: actor.uid,
+      approvedByName: actorName,
+      lastCorrectionReason: `تم نقل البيانات إلى ${targetDate}: ${reasonClean}`.slice(0, 500),
+      updatedAt: serverTimestamp(),
+    });
+
+    await batch.commit();
+
+    // Recalculate in chronological order (earlier date first, then later date)
+    const freshSourceSnap = await getDoc(doc(db, 'dailySessions', sourceSession.id));
+    const freshTargetSnap = await getDoc(doc(db, 'dailySessions', targetSession.id));
+    const freshSource = freshSourceSnap.exists()
+      ? ({ id: freshSourceSnap.id, ...(freshSourceSnap.data() as Omit<DailySession, 'id'>) })
+      : sourceSession;
+    const freshTarget = freshTargetSnap.exists()
+      ? ({ id: freshTargetSnap.id, ...(freshTargetSnap.data() as Omit<DailySession, 'id'>) })
+      : targetSession;
+
+    if (products.length > 0 && categories.length > 0) {
+      const ordered =
+        freshTarget.inventoryDate <= freshSource.inventoryDate
+          ? [freshTarget, freshSource]
+          : [freshSource, freshTarget];
+      for (const sess of ordered) {
+        await recalculateSessionResults(actor, sess, products, categories);
+      }
+    }
+
+    await appendAuditLog({
+      actor,
+      action: 'نقل_تقرير_قسم_بين_تاريخين',
+      targetCollection: 'departmentReports',
+      targetId: targetReportId,
+      sessionId: targetSession.id,
+      inventoryDate: targetDate,
+      branchId,
+      department,
+      oldValueSummary: `${DEPARTMENT_LABELS[department]} (${sourceDate}): ${movedCount} صنف`,
+      newValueSummary: `${DEPARTMENT_LABELS[department]} (${targetDate}): ${movedCount} صنف`,
+      reason: reasonClean,
+    });
+
+    return { movedItemsCount: movedCount };
+  } catch (error) {
+    if (error instanceof Error && !error.message.includes('Firestore')) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, 'departmentReports');
   }
 }
 

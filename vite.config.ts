@@ -13,15 +13,23 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         manifestFilename: 'manifest.json',
-        includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png'],
+        includeAssets: [
+          'icon.svg',
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'pwa-maskable-512x512.png',
+        ],
         manifest: {
           id: '/',
           name: 'نظام متابعة الجرد اليومي — المذاق اليمني',
-          short_name: 'المذاق اليمني',
+          short_name: 'جرد المذاق',
           description: 'تطبيق ويب متكامل لإدارة ومتابعة الجرد اليومي للمنتجات الجاهزة للبيع في مطاعم المذاق اليمني',
           theme_color: '#D91B23',
           background_color: '#FAFAFA',
           display: 'standalone',
+          display_override: ['standalone', 'minimal-ui'],
+          orientation: 'portrait-primary',
           start_url: '/',
           scope: '/',
           dir: 'rtl',
@@ -49,7 +57,12 @@ export default defineConfig(() => {
         },
         workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,jpeg}'],
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,jpeg,jpg,webp}'],
+          navigateFallback: 'index.html',
+          navigateFallbackDenylist: [/^\/api\//, /^\/__/],
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
@@ -73,6 +86,20 @@ export default defineConfig(() => {
                 expiration: {
                   maxEntries: 10,
                   maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
+              urlPattern: /\/assets\/.*/i,
+              handler: 'StaleWhileRevalidate',
+              options: {
+                cacheName: 'app-local-assets',
+                expiration: {
+                  maxEntries: 40,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
                 },
                 cacheableResponse: {
                   statuses: [0, 200],
