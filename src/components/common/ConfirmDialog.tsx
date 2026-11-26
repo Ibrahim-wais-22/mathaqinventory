@@ -36,7 +36,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
       role="dialog"
       aria-modal="true"
     >
-      <div className="w-full max-w-md rounded-2xl bg-white border border-zinc-200 p-6 shadow-xl">
+      <div className="w-full max-w-md max-h-[90dvh] overflow-y-auto rounded-2xl bg-white border border-zinc-200 p-6 shadow-xl">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
             <div

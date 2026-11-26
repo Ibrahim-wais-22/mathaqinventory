@@ -11,7 +11,6 @@ import {
   Unlock,
 } from 'lucide-react';
 import {
-  DEFAULT_BRANCH_ID,
   DEPARTMENT_LABELS,
   OPERATIONAL_DEPARTMENTS,
   REPORT_STATUS_LABELS,
@@ -27,7 +26,6 @@ import {
   formatActionError,
   recalculateSessionResults,
   reopenDailySession,
-  transferDepartmentReportBetweenDates,
 } from '../../services/inventory/firestoreService';
 import type {
   ApprovalRequest,
@@ -39,6 +37,7 @@ import type {
 } from '../../types/inventory';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { StatusBadge } from '../../components/common/StatusBadge';
+import { ReportDateTransferModal } from '../../components/inventory/ReportDateTransferModal';
 import { formatArabicDate, getPreviousAdenDate, makeSessionId, shiftIsoDate } from '../../utils/dateAden';
 
 export type NavTabId =
@@ -71,9 +70,6 @@ export const ExecutiveDashboard: React.FC<{
   const [reopenReason, setReopenReason] = useState('');
   const [transferModalOpen, setTransferModalOpen] = useState(false);
   const [transferDept, setTransferDept] = useState<OperationalDepartmentId>('sales');
-  const [transferFromDate, setTransferFromDate] = useState(inventoryDate);
-  const [transferToDate, setTransferToDate] = useState(() => getPreviousAdenDate(inventoryDate));
-  const [transferReason, setTransferReason] = useState('');
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
@@ -325,45 +321,9 @@ export const ExecutiveDashboard: React.FC<{
     }
   };
 
-  const openTransferModal = () => {
-    setTransferDept('sales');
-    setTransferFromDate(inventoryDate);
-    setTransferToDate(getPreviousAdenDate(inventoryDate));
-    setTransferReason('');
+  const openTransferModal = (dept: OperationalDepartmentId = 'sales') => {
+    setTransferDept(dept);
     setTransferModalOpen(true);
-  };
-
-  const handleTransferReportBetweenDates = async () => {
-    if (!account) return;
-    setCalculating(true);
-    setFeedback(null);
-    try {
-      const branchId = currentSession?.branchId || account.branchId || DEFAULT_BRANCH_ID;
-      const res = await transferDepartmentReportBetweenDates(
-        account,
-        branchId,
-        transferDept,
-        transferFromDate,
-        transferToDate,
-        transferReason,
-        products,
-        categories
-      );
-      setTransferModalOpen(false);
-      setTransferReason('');
-      setInventoryDate(transferToDate);
-      setFeedback({
-        type: 'success',
-        text: `تم نقل تقرير ${DEPARTMENT_LABELS[transferDept]} (${res.movedItemsCount} صنف) من ${transferFromDate} إلى ${transferToDate} وإعادة احتساب اليومين بنجاح.`,
-      });
-    } catch (err) {
-      setFeedback({
-        type: 'error',
-        text: formatActionError(err, 'تعذر نقل التقرير بين التاريخين.'),
-      });
-    } finally {
-      setCalculating(false);
-    }
   };
 
   return (
@@ -539,9 +499,9 @@ export const ExecutiveDashboard: React.FC<{
             <div className="flex items-center gap-3">
               <button
                 type="button"
-                onClick={openTransferModal}
-                className="inline-flex items-center gap-1 text-xs font-bold text-zinc-700 hover:text-[#D91B23] cursor-pointer whitespace-nowrap"
-                title="نقل تقرير تم إدخاله بتاريخ خاطئ إلى التاريخ الصحيح (للإدارة فقط)"
+                onClick={() => openTransferModal('sales')}
+                className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs font-bold text-zinc-700 hover:border-[#D91B23] hover:text-[#D91B23] cursor-pointer whitespace-nowrap"
+                title="نقل تقرير مُرحّل أو مدخل إلى تاريخ آخر (للإدارة فقط)"
               >
                 <ArrowLeftRight className="h-3.5 w-3.5" />
                 <span>نقل لتاريخ آخر</span>
@@ -826,84 +786,12 @@ export const ExecutiveDashboard: React.FC<{
         </div>
       </ConfirmDialog>
 
-      {/* Admin-only Report Date Transfer Modal */}
-      <ConfirmDialog
+      <ReportDateTransferModal
         open={transferModalOpen}
-        title="نقل تقرير قسم إلى تاريخ آخر (للإدارة فقط)"
-        description="ينقل بيانات القسم كاملة من تاريخ أُدخل بالخطأ إلى التاريخ الصحيح، ويُفرغ تقرير المصدر ليعود مسودة جاهزة للإدخال الجديد، مع إعادة احتساب اليومين."
-        confirmLabel="تنفيذ النقل وإعادة الاحتساب"
-        variant="danger"
-        busy={calculating}
-        confirmDisabled={
-          !transferFromDate ||
-          !transferToDate ||
-          transferFromDate === transferToDate ||
-          !transferReason.trim()
-        }
-        onConfirm={() => void handleTransferReportBetweenDates()}
-        onCancel={() => setTransferModalOpen(false)}
-      >
-        <div className="space-y-3">
-          <div>
-            <label className="block text-xs font-semibold text-zinc-700 mb-1">القسم</label>
-            <select
-              value={transferDept}
-              onChange={(e) => setTransferDept(e.target.value as OperationalDepartmentId)}
-              className="w-full min-h-[40px] rounded-xl border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-800"
-            >
-              {OPERATIONAL_DEPARTMENTS.map((dept) => (
-                <option key={dept} value={dept}>
-                  {DEPARTMENT_LABELS[dept]}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1">
-                من تاريخ (المُدخل بالخطأ)
-              </label>
-              <input
-                type="date"
-                value={transferFromDate}
-                onChange={(e) => setTransferFromDate(e.target.value)}
-                className="w-full min-h-[40px] rounded-xl border border-zinc-200 bg-white px-3 text-sm font-semibold tabular-nums"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1">
-                إلى تاريخ (التاريخ الصحيح)
-              </label>
-              <input
-                type="date"
-                value={transferToDate}
-                onChange={(e) => setTransferToDate(e.target.value)}
-                className="w-full min-h-[40px] rounded-xl border border-zinc-200 bg-white px-3 text-sm font-semibold tabular-nums"
-              />
-            </div>
-          </div>
-
-          {transferDept === 'factory' && (
-            <p className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-[11px] text-amber-900">
-              ملاحظة: ينقل هذا الإجراء تقرير «الكميات المجهزة» للمعمل فقط ولا ينقل إشعارات التوريد أو المرتجعات.
-            </p>
-          )}
-
-          <div>
-            <label className="block text-xs font-semibold text-zinc-700 mb-1">
-              سبب النقل (إلزامي لسجل التدقيق)
-            </label>
-            <textarea
-              rows={2}
-              value={transferReason}
-              onChange={(e) => setTransferReason(e.target.value)}
-              placeholder="مثال: تم إدخال مبيعات يوم 25 داخل يوم 26 بالخطأ..."
-              className="w-full rounded-xl border border-zinc-200 p-3 text-sm"
-            />
-          </div>
-        </div>
-      </ConfirmDialog>
+        initialDepartment={transferDept}
+        onClose={() => setTransferModalOpen(false)}
+        onSuccess={(msg) => setFeedback({ type: 'success', text: msg })}
+      />
     </div>
   );
 };

@@ -9,6 +9,7 @@ import {
 } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 import {
+  ArrowLeftRight,
   CopyCheck,
   Edit3,
   FileSpreadsheet,
@@ -62,7 +63,8 @@ import {
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { MultiUnitQtyInput } from '../../components/common/MultiUnitQtyInput';
 import { StatusBadge } from '../../components/common/StatusBadge';
-import { formatTimestampAden } from '../../utils/dateAden';
+import { ReportDateTransferModal } from '../../components/inventory/ReportDateTransferModal';
+import { formatTimestampAden, getPreviousAdenDate } from '../../utils/dateAden';
 
 export const FactoryWorkspace: React.FC = () => {
   const {
@@ -73,7 +75,9 @@ export const FactoryWorkspace: React.FC = () => {
     refreshSession,
     categories,
     products,
+    isAdmin,
     isDeptQtyReadOnly,
+    inventoryDate,
   } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
@@ -100,6 +104,7 @@ export const FactoryWorkspace: React.FC = () => {
   const [confirmSubmitOpen, setConfirmSubmitOpen] = useState(false);
   const [confirmTransferOpen, setConfirmTransferOpen] = useState(false);
   const [confirmReturnOpen, setConfirmReturnOpen] = useState(false);
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
 
   // Propose new product modal state
   const [newProdModal, setNewProdModal] = useState(false);
@@ -1033,6 +1038,17 @@ export const FactoryWorkspace: React.FC = () => {
               tone={report.status === 'draft' ? 'warning' : 'success'}
               icon={report.status === 'draft' ? 'clock' : 'check'}
             />
+          )}
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => setTransferModalOpen(true)}
+              className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs font-bold text-zinc-700 hover:border-[#D91B23] hover:text-[#D91B23] cursor-pointer whitespace-nowrap"
+              title="نقل بيانات المعمل والتوريدات (حتى بعد الترحيل) إلى تاريخ آخر — للإدارة فقط"
+            >
+              <ArrowLeftRight className="h-3.5 w-3.5" />
+              <span>نقل لتاريخ آخر</span>
+            </button>
           )}
           {transfers.length > 0 && (
             <button
@@ -2017,6 +2033,14 @@ export const FactoryWorkspace: React.FC = () => {
           </div>
         </div>
       )}
+      <ReportDateTransferModal
+        open={transferModalOpen}
+        initialDepartment="factory"
+        initialFromDate={inventoryDate}
+        initialToDate={getPreviousAdenDate(inventoryDate)}
+        onClose={() => setTransferModalOpen(false)}
+        onSuccess={(msg) => setFeedback({ type: 'success', text: msg })}
+      />
     </div>
   );
 };

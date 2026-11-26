@@ -8,6 +8,7 @@ import {
   where,
 } from 'firebase/firestore';
 import {
+  ArrowLeftRight,
   CheckCircle2,
   ClipboardCheck,
   Edit3,
@@ -56,7 +57,8 @@ import {
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { MultiUnitQtyInput } from '../../components/common/MultiUnitQtyInput';
 import { StatusBadge } from '../../components/common/StatusBadge';
-import { formatTimestampAden } from '../../utils/dateAden';
+import { ReportDateTransferModal } from '../../components/inventory/ReportDateTransferModal';
+import { formatTimestampAden, getPreviousAdenDate } from '../../utils/dateAden';
 
 export const ProductionWorkspace: React.FC = () => {
   const {
@@ -68,7 +70,9 @@ export const ProductionWorkspace: React.FC = () => {
     categories,
     products,
     hasPermission,
+    isAdmin,
     isDeptQtyReadOnly,
+    inventoryDate,
   } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
@@ -104,6 +108,7 @@ export const ProductionWorkspace: React.FC = () => {
   const [corrNewVal, setCorrNewVal] = useState('');
   const [corrCounts, setCorrCounts] = useState<Record<string, string>>({});
   const [corrReason, setCorrReason] = useState('');
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
 
   const canReadResults = hasPermission('view_results');
   const isSessionClosed = currentSession?.status === 'closed';
@@ -606,6 +611,17 @@ export const ProductionWorkspace: React.FC = () => {
             >
               <Send className="h-4 w-4" />
               <span>ترحيل تقرير الإنتاج</span>
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => setTransferModalOpen(true)}
+              className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs font-bold text-zinc-700 hover:border-[#D91B23] hover:text-[#D91B23] cursor-pointer whitespace-nowrap"
+              title="نقل تقرير الإنتاج (حتى بعد الترحيل) إلى تاريخ آخر — للإدارة فقط"
+            >
+              <ArrowLeftRight className="h-3.5 w-3.5" />
+              <span>نقل لتاريخ آخر</span>
             </button>
           )}
         </div>
@@ -1311,6 +1327,14 @@ export const ProductionWorkspace: React.FC = () => {
           </div>
         </div>
       )}
+      <ReportDateTransferModal
+        open={transferModalOpen}
+        initialDepartment="production"
+        initialFromDate={inventoryDate}
+        initialToDate={getPreviousAdenDate(inventoryDate)}
+        onClose={() => setTransferModalOpen(false)}
+        onSuccess={(msg) => setFeedback({ type: 'success', text: msg })}
+      />
     </div>
   );
 };

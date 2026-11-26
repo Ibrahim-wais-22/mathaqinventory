@@ -591,34 +591,44 @@ service cloud.firestore {
           )
         );
       allow update: if isActiveUser() && isValidId(transferId) && isValidFactoryTransfer(incoming()) &&
-        incoming().sessionId == existing().sessionId &&
         incoming().createdBy == existing().createdBy &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
-        sessionIsOpen(existing().sessionId) &&
         (
           (
-            (isDept('production') || isBootstrapAdmin()) &&
-            existing().status == 'pending_receipt' &&
-            incoming().status in ['received', 'discrepancy_logged'] &&
-            incoming().totalSentQty == existing().totalSentQty &&
-            incoming().receivedBy == request.auth.uid &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'totalReceivedQty', 'totalVarianceQty', 'productionNote', 'receivedBy', 'receivedByName', 'updatedAt'])
+            isAdmin() &&
+            incoming().branchId == existing().branchId &&
+            exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['sessionId', 'inventoryDate', 'factoryNote', 'updatedAt'])
           ) ||
           (
-            (isDept('factory') || isAdmin()) &&
-            existing().status == 'pending_receipt' &&
-            incoming().status == 'pending_receipt' &&
-            (!('transferType' in incoming()) || incoming().transferType == 'dispatch') &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['totalSentQty', 'factoryNote', 'updatedAt'])
-          ) ||
-          (
-            (isDept('factory') || isAdmin()) &&
-            existing().status == 'returned' &&
-            incoming().status == 'returned' &&
-            incoming().totalReceivedQty == incoming().totalSentQty &&
-            incoming().totalVarianceQty == 0 &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['totalSentQty', 'totalReceivedQty', 'factoryNote', 'updatedAt'])
+            incoming().sessionId == existing().sessionId &&
+            sessionIsOpen(existing().sessionId) &&
+            (
+              (
+                (isDept('production') || isBootstrapAdmin()) &&
+                existing().status == 'pending_receipt' &&
+                incoming().status in ['received', 'discrepancy_logged'] &&
+                incoming().totalSentQty == existing().totalSentQty &&
+                incoming().receivedBy == request.auth.uid &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'totalReceivedQty', 'totalVarianceQty', 'productionNote', 'receivedBy', 'receivedByName', 'updatedAt'])
+              ) ||
+              (
+                (isDept('factory') || isAdmin()) &&
+                existing().status == 'pending_receipt' &&
+                incoming().status == 'pending_receipt' &&
+                (!('transferType' in incoming()) || incoming().transferType == 'dispatch') &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['totalSentQty', 'factoryNote', 'updatedAt'])
+              ) ||
+              (
+                (isDept('factory') || isAdmin()) &&
+                existing().status == 'returned' &&
+                incoming().status == 'returned' &&
+                incoming().totalReceivedQty == incoming().totalSentQty &&
+                incoming().totalVarianceQty == 0 &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['totalSentQty', 'totalReceivedQty', 'factoryNote', 'updatedAt'])
+              )
+            )
           )
         );
       allow delete: if isActiveUser() && isValidId(transferId) &&
@@ -639,24 +649,34 @@ service cloud.firestore {
           ) &&
           sessionIsOpen(incoming().sessionId) &&
           (isDept('factory') || isAdmin());
-        allow update: if isActiveUser() && isValidId(transferId) && isValidFactoryTransferItem(incoming()) &&
+        allow update: if isActiveUser() && isValidId(transferId) && isValidId(productId) && isValidFactoryTransferItem(incoming()) &&
           incoming().transferId == existing().transferId &&
-          incoming().sessionId == existing().sessionId &&
           incoming().productId == existing().productId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
-          sessionIsOpen(existing().sessionId) &&
           (
             (
-              (isDept('production') || isBootstrapAdmin()) &&
-              incoming().sentQty == existing().sentQty &&
-              get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status == 'pending_receipt' &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['receivedQty', 'receivedBreakdown', 'varianceQty', 'note', 'updatedAt'])
+              isAdmin() &&
+              exists(/databases/$(database)/documents/factoryTransfers/$(transferId)) &&
+              exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['sessionId', 'updatedAt'])
             ) ||
             (
-              (isDept('factory') || isAdmin()) &&
-              get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status in ['pending_receipt', 'returned'] &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['sentQty', 'sentBreakdown', 'receivedQty', 'receivedBreakdown', 'varianceQty', 'note', 'updatedAt'])
+              incoming().sessionId == existing().sessionId &&
+              sessionIsOpen(existing().sessionId) &&
+              (
+                (
+                  (isDept('production') || isBootstrapAdmin()) &&
+                  incoming().sentQty == existing().sentQty &&
+                  get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status == 'pending_receipt' &&
+                  incoming().diff(existing()).affectedKeys().hasOnly(['receivedQty', 'receivedBreakdown', 'varianceQty', 'note', 'updatedAt'])
+                ) ||
+                (
+                  (isDept('factory') || isAdmin()) &&
+                  get(/databases/$(database)/documents/factoryTransfers/$(transferId)).data.status in ['pending_receipt', 'returned'] &&
+                  incoming().diff(existing()).affectedKeys().hasOnly(['sentQty', 'sentBreakdown', 'receivedQty', 'receivedBreakdown', 'varianceQty', 'note', 'updatedAt'])
+                )
+              )
             )
           );
         allow delete: if isActiveUser() && isValidId(transferId) && isValidId(productId) &&

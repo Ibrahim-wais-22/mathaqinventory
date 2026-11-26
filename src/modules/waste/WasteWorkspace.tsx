@@ -6,7 +6,7 @@ import {
   query,
   where,
 } from 'firebase/firestore';
-import { Edit3, Info, RefreshCw, Save, Search, Send } from 'lucide-react';
+import { ArrowLeftRight, Edit3, Info, RefreshCw, Save, Search, Send } from 'lucide-react';
 import { REPORT_STATUS_LABELS } from '../../constants/departments';
 import { useFirebase } from '../../app/providers/FirebaseProvider';
 import { OperationType, db, handleFirestoreError } from '../../services/firebase/config';
@@ -33,6 +33,8 @@ import {
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { MultiUnitQtyInput } from '../../components/common/MultiUnitQtyInput';
 import { StatusBadge } from '../../components/common/StatusBadge';
+import { ReportDateTransferModal } from '../../components/inventory/ReportDateTransferModal';
+import { getPreviousAdenDate } from '../../utils/dateAden';
 
 interface WasteDraftRow {
   damagedQty: string;
@@ -52,7 +54,9 @@ export const WasteWorkspace: React.FC = () => {
     refreshSession,
     categories,
     products,
+    isAdmin,
     isDeptQtyReadOnly,
+    inventoryDate,
   } = useFirebase();
 
   const [report, setReport] = useState<DepartmentReport | null>(null);
@@ -69,6 +73,7 @@ export const WasteWorkspace: React.FC = () => {
   const [corrNewVal, setCorrNewVal] = useState('');
   const [corrCounts, setCorrCounts] = useState<Record<string, string>>({});
   const [corrReason, setCorrReason] = useState('');
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
 
   const isSessionClosed = currentSession?.status === 'closed';
   const isSubmitted = report ? report.status !== 'draft' : false;
@@ -358,13 +363,26 @@ export const WasteWorkspace: React.FC = () => {
             ثلاث خانات مستقلة لكل صنف — يمنع تسجيل نفس الوحدة في أكثر من خانة
           </p>
         </div>
-        {report && (
-          <StatusBadge
-            label={`الحالة: ${REPORT_STATUS_LABELS[report.status]}`}
-            tone={report.status === 'draft' ? 'warning' : 'success'}
-            icon={report.status === 'draft' ? 'clock' : 'check'}
-          />
-        )}
+        <div className="flex flex-wrap items-center gap-2.5">
+          {report && (
+            <StatusBadge
+              label={`الحالة: ${REPORT_STATUS_LABELS[report.status]}`}
+              tone={report.status === 'draft' ? 'warning' : 'success'}
+              icon={report.status === 'draft' ? 'clock' : 'check'}
+            />
+          )}
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => setTransferModalOpen(true)}
+              className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs font-bold text-zinc-700 hover:border-[#D91B23] hover:text-[#D91B23] cursor-pointer whitespace-nowrap"
+              title="نقل تقرير الهدر والمتبقي (حتى بعد الترحيل) إلى تاريخ آخر — للإدارة فقط"
+            >
+              <ArrowLeftRight className="h-3.5 w-3.5" />
+              <span>نقل لتاريخ آخر</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {isDeptQtyReadOnly && (
@@ -661,6 +679,14 @@ export const WasteWorkspace: React.FC = () => {
           </div>
         </div>
       )}
+      <ReportDateTransferModal
+        open={transferModalOpen}
+        initialDepartment="waste"
+        initialFromDate={inventoryDate}
+        initialToDate={getPreviousAdenDate(inventoryDate)}
+        onClose={() => setTransferModalOpen(false)}
+        onSuccess={(msg) => setFeedback({ type: 'success', text: msg })}
+      />
     </div>
   );
 };
