@@ -5,18 +5,20 @@ import {
   ChevronDown,
   ChevronUp,
   FileSpreadsheet,
+  Search,
   X,
 } from 'lucide-react';
 import type { Product, ProductUnitOption, UnitBreakdown } from '../../types/inventory';
 import {
   decomposeTotalToUnitCounts,
-  formatBreakdownText,
   getEffectiveProductUnits,
   roundQty3,
 } from '../../utils/productUnits';
 import {
   analyzeExcelSheet,
+  guessUnitOptionForText,
   type ExcelMatchReason,
+  type MatchedSourceLine,
   type ParsedExcelWorkbook,
 } from '../../utils/salesExcelImport';
 
@@ -35,15 +37,37 @@ interface SalesExcelImportModalProps {
   onClose: () => void;
 }
 
+interface ManualLinkEntry {
+  productId: string;
+  unitName?: string;
+}
+
+type UnitFilterTab = 'all' | 'multi' | 'single';
+
 const MATCH_REASON_LABELS: Record<ExcelMatchReason, string> = {
   exact: 'مطابقة مباشرة',
   normalized: 'بعد توحيد النص',
   reordered: 'ترتيب كلمات مختلف',
-  unit_variant: 'مطابقة بالصنف والوحدة',
-  subset: 'مطابقة جزئية دقيقة',
+  unit_variant: 'فصل الصنف والوحدة',
+  subset: 'تمييز الصنف بدقة',
   fuzzy: 'تشابه إملائي',
   manual: 'ربط يدوي',
 };
+
+function formatFormulaLine(
+  units: ProductUnitOption[],
+  breakdown?: UnitBreakdown
+): string {
+  if (!breakdown) return '';
+  const parts: string[] = [];
+  for (const u of units) {
+    const c = breakdown[u.name];
+    if (typeof c === 'number' && c > 0) {
+      parts.push(`${roundQty3(c)} ${u.name} (×${u.factor})`);
+    }
+  }
+  return parts.join(' + ');
+}
 
 export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
   workbook,
@@ -53,12 +77,16 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
   onClose,
 }) => {
   const [selectedSheetName, setSelectedSheetName] = useState(workbook.defaultSheetName);
-  const [columnOverride, setColumnOverride] = useState<{ nameCol: number; qtyCol: number } | null>(
-    null
-  );
+  const [columnOverride, setColumnOverride] = useState<{
+    nameCol: number;
+    qtyCol: number;
+    unitCol: number;
+  } | null>(null);
   const [deselectedProductIds, setDeselectedProductIds] = useState<Record<string, boolean>>({});
-  const [manualLinks, setManualLinks] = useState<Record<string, string>>({});
+  const [manualLinks, setManualLinks] = useState<Record<string, ManualLinkEntry>>({});
   const [showIgnoredRows, setShowIgnoredRows] = useState(false);
+  const [unitFilterTab, setUnitFilterTab] = useState<UnitFilterTab>('all');
+  const [previewSearch, setPreviewSearch] = useState('');
 
   const activeSheet = useMemo(
     () => workbook.sheets.find((s) => s.name === selectedSheetName) || workbook.sheets[0],
@@ -77,17 +105,19 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
 
   const productById = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
 
-  // Combine auto-matched items with any manually linked unrecognized items
+  // Combine auto-matched items with any manually linked unrecognized items while preserving separated unit counts
   const combinedPreview = useMemo(() => {
     const mergedMap = new Map<
       string,
       {
         product: Product;
         effectiveUnits: ProductUnitOption[];
+        hasMultiUnitSupport: boolean;
         qty: number;
         counts: Record<string, string>;
         breakdown?: UnitBreakdown;
         excelNames: string[];
+        sourceLines: MatchedSourceLine[];
         matchReason: ExcelMatchReason;
         isManualAddition: boolean;
       }
@@ -97,36 +127,74 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
       mergedMap.set(item.product.id, {
         product: item.product,
         effectiveUnits: item.effectiveUnits,
+        hasMultiUnitSupport: item.hasMultiUnitSupport,
         qty: item.extractedQty,
-        counts: item.counts,
-        breakdown: item.unitBreakdown,
+        counts: { ...item.counts },
+        breakdown: item.unitBreakdown ? { ...item.unitBreakdown } : undefined,
         excelNames: [...item.excelNames],
+        sourceLines: [...item.sourceLines],
         matchReason: item.matchReason,
         isManualAddition: false,
       });
     }
 
     for (const unrec of analysis.unrecognized) {
-      const targetProdId = manualLinks[unrec.rowKey];
-      if (!targetProdId) continue;
-      const prod = productById.get(targetProdId);
+      const link = manualLinks[unrec.rowKey];
+      if (!link?.productId) continue;
+      const prod = productById.get(link.productId);
       if (!prod) continue;
+
       const units = getEffectiveProductUnits(prod);
+      const chosenUnit =
+        units.find((u) => u.name === link.unitName) ||
+        guessUnitOptionForText(unrec.rawUnitHint || unrec.excelName, units) ||
+        units[0];
+      const factor = chosenUnit?.factor ?? 1;
+      const unitLabel = chosenUnit?.name || prod.unit;
+      const addedBase = roundQty3(unrec.extractedQty * factor);
+
+      const manualLine: MatchedSourceLine = {
+        rowNumber: unrec.sourceRowNumbers[0] || 0,
+        excelName: unrec.excelName,
+        rawQty: unrec.extractedQty,
+        unitLabel,
+        unitFactor: factor,
+        baseEquivalent: addedBase,
+        matchReason: 'manual',
+      };
+
       const existing = mergedMap.get(prod.id);
       if (existing) {
-        const nextTotal = roundQty3(existing.qty + unrec.extractedQty);
-        const nextCounts = decomposeTotalToUnitCounts(nextTotal, units);
-        const nextBreakdown: UnitBreakdown = {};
+        const nextTotal = roundQty3(existing.qty + addedBase);
+        const nextBreakdown: UnitBreakdown = { ...(existing.breakdown || {}) };
+        if (unrec.extractedQty > 0) {
+          nextBreakdown[unitLabel] = roundQty3((nextBreakdown[unitLabel] || 0) + unrec.extractedQty);
+        }
+        const nextCounts = decomposeTotalToUnitCounts(
+          nextTotal,
+          units,
+          Object.keys(nextBreakdown).length > 0 ? nextBreakdown : undefined
+        );
+        const finalBreakdown: UnitBreakdown = {};
         for (const u of units) {
           const val = Number(nextCounts[u.name] || 0);
-          if (val > 0) nextBreakdown[u.name] = roundQty3(val);
+          if (val > 0) finalBreakdown[u.name] = roundQty3(val);
         }
         existing.qty = nextTotal;
         existing.counts = nextCounts;
-        existing.breakdown = Object.keys(nextBreakdown).length > 0 ? nextBreakdown : undefined;
+        existing.breakdown = Object.keys(finalBreakdown).length > 0 ? finalBreakdown : undefined;
         existing.excelNames.push(unrec.excelName);
+        existing.sourceLines.push(manualLine);
       } else {
-        const counts = decomposeTotalToUnitCounts(unrec.extractedQty, units);
+        const explicitBreakdown: UnitBreakdown = {};
+        if (unrec.extractedQty > 0) {
+          explicitBreakdown[unitLabel] = roundQty3(unrec.extractedQty);
+        }
+        const counts = decomposeTotalToUnitCounts(
+          addedBase,
+          units,
+          Object.keys(explicitBreakdown).length > 0 ? explicitBreakdown : undefined
+        );
         const breakdown: UnitBreakdown = {};
         for (const u of units) {
           const val = Number(counts[u.name] || 0);
@@ -135,18 +203,57 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
         mergedMap.set(prod.id, {
           product: prod,
           effectiveUnits: units,
-          qty: unrec.extractedQty,
+          hasMultiUnitSupport: units.length > 1,
+          qty: addedBase,
           counts,
           breakdown: Object.keys(breakdown).length > 0 ? breakdown : undefined,
           excelNames: [unrec.excelName],
+          sourceLines: [manualLine],
           matchReason: 'manual',
           isManualAddition: true,
         });
       }
     }
 
-    return Array.from(mergedMap.values());
+    return Array.from(mergedMap.values()).sort((a, b) => {
+      if (a.hasMultiUnitSupport !== b.hasMultiUnitSupport) {
+        return a.hasMultiUnitSupport ? -1 : 1;
+      }
+      return a.product.name.localeCompare(b.product.name, 'ar');
+    });
   }, [analysis.matched, analysis.unrecognized, manualLinks, productById]);
+
+  const multiUnitCount = useMemo(
+    () => combinedPreview.filter((r) => r.hasMultiUnitSupport).length,
+    [combinedPreview]
+  );
+  const singleUnitCount = useMemo(
+    () => combinedPreview.filter((r) => !r.hasMultiUnitSupport).length,
+    [combinedPreview]
+  );
+
+  const visiblePreview = useMemo(() => {
+    const q = previewSearch.trim();
+    return combinedPreview.filter((row) => {
+      if (unitFilterTab === 'multi' && !row.hasMultiUnitSupport) return false;
+      if (unitFilterTab === 'single' && row.hasMultiUnitSupport) return false;
+      if (q) {
+        const inProd = row.product.name.includes(q);
+        const inExcel = row.excelNames.some((n) => n.includes(q));
+        if (!inProd && !inExcel) return false;
+      }
+      return true;
+    });
+  }, [combinedPreview, unitFilterTab, previewSearch]);
+
+  const visibleMultiRows = useMemo(
+    () => visiblePreview.filter((r) => r.hasMultiUnitSupport),
+    [visiblePreview]
+  );
+  const visibleSingleRows = useMemo(
+    () => visiblePreview.filter((r) => !r.hasMultiUnitSupport),
+    [visiblePreview]
+  );
 
   const selectedRows = useMemo(
     () => combinedPreview.filter((row) => !deselectedProductIds[row.product.id]),
@@ -159,7 +266,7 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
   );
 
   const unresolvedCount = useMemo(
-    () => analysis.unrecognized.filter((u) => !manualLinks[u.rowKey]).length,
+    () => analysis.unrecognized.filter((u) => !manualLinks[u.rowKey]?.productId).length,
     [analysis.unrecognized, manualLinks]
   );
 
@@ -197,6 +304,105 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
 
   const headerOptions = analysis.detection.headers;
 
+  const renderPreviewRow = (row: (typeof combinedPreview)[number]) => {
+    const checked = !deselectedProductIds[row.product.id];
+    const existingVal = existingSalesMap[row.product.id];
+    const hasExisting = existingVal !== undefined && existingVal !== '';
+    const formulaLine = row.hasMultiUnitSupport
+      ? formatFormulaLine(row.effectiveUnits, row.breakdown)
+      : '';
+
+    return (
+      <tr
+        key={row.product.id}
+        className={checked ? 'hover:bg-zinc-50/80' : 'opacity-50 bg-zinc-50/40'}
+      >
+        <td className="px-3 py-2.5 align-top">
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={() =>
+              setDeselectedProductIds((prev) => ({
+                ...prev,
+                [row.product.id]: checked,
+              }))
+            }
+            aria-label={`استيراد ${row.product.name}`}
+            className="h-4 w-4 mt-0.5 accent-[#D91B23] cursor-pointer"
+          />
+        </td>
+        <td className="px-3 py-2.5 align-top">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-bold text-zinc-900 text-sm">{row.product.name}</span>
+            <span className="rounded-md bg-zinc-100 border border-zinc-200 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600">
+              {MATCH_REASON_LABELS[row.matchReason]}
+            </span>
+          </div>
+          {row.sourceLines.length > 0 && (
+            <div className="mt-1 space-y-0.5 text-[11px] text-zinc-500">
+              {row.sourceLines.map((sl, idx) => (
+                <div key={`${row.product.id}-sl-${idx}`} className="flex flex-wrap items-center gap-x-1.5">
+                  <span className="text-zinc-700 font-medium">{sl.excelName}</span>
+                  <span aria-hidden="true">←</span>
+                  <span className="tabular-nums">
+                    {sl.rawQty} {sl.unitLabel}
+                  </span>
+                  {sl.unitFactor !== 1 && (
+                    <span className="text-zinc-400 tabular-nums">
+                      (= {sl.baseEquivalent} {row.product.unit})
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </td>
+        <td className="px-3 py-2.5 align-top">
+          {row.hasMultiUnitSupport ? (
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-1.5 tabular-nums">
+                {row.effectiveUnits.map((u) => {
+                  const val = row.breakdown?.[u.name] ?? 0;
+                  return (
+                    <div
+                      key={u.name}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] ${
+                        val > 0
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-900 font-bold'
+                          : 'border-zinc-200 bg-zinc-50 text-zinc-400'
+                      }`}
+                    >
+                      <span>{u.name}:</span>
+                      <span>{val}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              {formulaLine && (
+                <div className="text-[10px] text-zinc-500 tabular-nums">{formulaLine}</div>
+              )}
+            </div>
+          ) : (
+            <span className="inline-flex items-center rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] text-zinc-600">
+              وحدة واحدة ({row.product.unit})
+            </span>
+          )}
+        </td>
+        <td className="px-3 py-2.5 align-top tabular-nums whitespace-nowrap">
+          <div className="font-bold text-zinc-900 text-sm">
+            {row.qty}{' '}
+            <span className="font-normal text-xs text-zinc-500">{row.product.unit}</span>
+          </div>
+          {hasExisting && (
+            <div className="text-[11px] text-amber-700 mt-0.5">
+              الحالي: {existingVal}
+            </div>
+          )}
+        </td>
+      </tr>
+    );
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 sm:p-5"
@@ -204,7 +410,7 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
       aria-modal="true"
       aria-labelledby="excel-import-preview-title"
     >
-      <div className="w-full max-w-5xl max-h-[92vh] flex flex-col rounded-2xl bg-white border border-zinc-200 overflow-hidden">
+      <div className="w-full max-w-6xl max-h-[92vh] flex flex-col rounded-2xl bg-white border border-zinc-200 overflow-hidden">
         {/* Header */}
         <div className="px-5 py-4 border-b border-zinc-200 flex items-start justify-between gap-4">
           <div className="min-w-0">
@@ -242,7 +448,7 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
         </div>
 
         {/* Sheet & Column Controls + Summary */}
-        <div className="px-5 py-3 bg-zinc-50 border-b border-zinc-200 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        <div className="px-5 py-3 bg-zinc-50 border-b border-zinc-200 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
             {workbook.sheets.length > 1 && (
               <label className="flex items-center gap-2 text-xs text-zinc-600">
@@ -271,15 +477,17 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
                 onChange={(e) => {
                   const nextNameCol = Number(e.target.value);
                   const currentQty = analysis.detection.qtyCol;
+                  const currentUnit = analysis.detection.unitCol;
                   setColumnOverride({
                     nameCol: nextNameCol,
                     qtyCol:
                       nextNameCol === currentQty
                         ? (nextNameCol + 1) % Math.max(headerOptions.length, 2)
                         : currentQty,
+                    unitCol: currentUnit === nextNameCol ? -1 : currentUnit,
                   });
                 }}
-                className="min-h-[38px] rounded-lg border border-zinc-200 bg-white px-2.5 text-xs text-zinc-900 max-w-[170px]"
+                className="min-h-[38px] rounded-lg border border-zinc-200 bg-white px-2.5 text-xs text-zinc-900 max-w-[160px]"
               >
                 {headerOptions.map((label, idx) => (
                   <option key={`name-col-${idx}`} value={idx}>
@@ -296,18 +504,47 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
                 onChange={(e) => {
                   const nextQtyCol = Number(e.target.value);
                   const currentName = analysis.detection.nameCol;
+                  const currentUnit = analysis.detection.unitCol;
                   setColumnOverride({
                     nameCol:
                       nextQtyCol === currentName
                         ? (nextQtyCol + 1) % Math.max(headerOptions.length, 2)
                         : currentName,
                     qtyCol: nextQtyCol,
+                    unitCol: currentUnit === nextQtyCol ? -1 : currentUnit,
                   });
                 }}
-                className="min-h-[38px] rounded-lg border border-zinc-200 bg-white px-2.5 text-xs text-zinc-900 max-w-[170px]"
+                className="min-h-[38px] rounded-lg border border-zinc-200 bg-white px-2.5 text-xs text-zinc-900 max-w-[160px]"
               >
                 {headerOptions.map((label, idx) => (
                   <option key={`qty-col-${idx}`} value={idx}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex items-center gap-2 text-xs text-zinc-600">
+              <span className="font-semibold whitespace-nowrap">عمود الوحدة:</span>
+              <select
+                value={analysis.detection.unitCol}
+                onChange={(e) => {
+                  const nextUnitCol = Number(e.target.value);
+                  setColumnOverride({
+                    nameCol: analysis.detection.nameCol,
+                    qtyCol: analysis.detection.qtyCol,
+                    unitCol: nextUnitCol,
+                  });
+                }}
+                className="min-h-[38px] rounded-lg border border-zinc-200 bg-white px-2.5 text-xs text-zinc-900 max-w-[160px]"
+              >
+                <option value={-1}>تلقائي من اسم الصنف</option>
+                {headerOptions.map((label, idx) => (
+                  <option
+                    key={`unit-col-${idx}`}
+                    value={idx}
+                    disabled={idx === analysis.detection.nameCol || idx === analysis.detection.qtyCol}
+                  >
                     {label}
                   </option>
                 ))}
@@ -322,17 +559,22 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
             </span>
             <span aria-hidden="true">·</span>
             <span>
+              بنص وربع:{' '}
+              <strong className="text-zinc-900 font-bold">{multiUnitCount}</strong>
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              وحدة واحدة:{' '}
+              <strong className="text-zinc-900 font-bold">{singleUnitCount}</strong>
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
               غير معروفة:{' '}
               <strong className="text-amber-700 font-bold">{unresolvedCount}</strong>
             </span>
             <span aria-hidden="true">·</span>
             <span>
-              مهملة:{' '}
-              <strong className="text-zinc-800 font-bold">{analysis.ignoredRows.length}</strong>
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>
-              إجمالي الكمية:{' '}
+              الصافي:{' '}
               <strong className="text-zinc-900 font-bold">{totalSelectedQty}</strong>
             </span>
           </div>
@@ -342,22 +584,75 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
         <div className="flex-1 overflow-y-auto p-5">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
             {/* Matched Products Table */}
-            <div className="lg:col-span-7 border border-zinc-200 rounded-xl overflow-hidden bg-white">
-              <div className="px-4 py-3 border-b border-zinc-100 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-                  <h4 className="text-sm font-bold text-zinc-900">
-                    الأصناف المطابقة بنجاح ({selectedRows.length} / {combinedPreview.length})
-                  </h4>
+            <div className="lg:col-span-8 border border-zinc-200 rounded-xl overflow-hidden bg-white">
+              <div className="px-4 py-3 border-b border-zinc-100 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                    <h4 className="text-sm font-bold text-zinc-900">
+                      الأصناف المطابقة بنجاح ({selectedRows.length} / {combinedPreview.length})
+                    </h4>
+                  </div>
+                  {combinedPreview.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={toggleAll}
+                      className="text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer whitespace-nowrap"
+                    >
+                      {allSelected ? 'إلغاء تحديد الكل' : 'تحديد الكل'}
+                    </button>
+                  )}
                 </div>
+
                 {combinedPreview.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={toggleAll}
-                    className="text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer whitespace-nowrap"
-                  >
-                    {allSelected ? 'إلغاء تحديد الكل' : 'تحديد الكل'}
-                  </button>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setUnitFilterTab('all')}
+                        className={`px-2.5 py-1.5 rounded-md text-xs font-semibold cursor-pointer whitespace-nowrap ${
+                          unitFilterTab === 'all'
+                            ? 'bg-white text-zinc-900 shadow-xs'
+                            : 'text-zinc-600 hover:text-zinc-900'
+                        }`}
+                      >
+                        الكل ({combinedPreview.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setUnitFilterTab('multi')}
+                        className={`px-2.5 py-1.5 rounded-md text-xs font-semibold cursor-pointer whitespace-nowrap ${
+                          unitFilterTab === 'multi'
+                            ? 'bg-white text-[#D91B23] shadow-xs'
+                            : 'text-zinc-600 hover:text-zinc-900'
+                        }`}
+                      >
+                        أصناف بنص وربع ({multiUnitCount})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setUnitFilterTab('single')}
+                        className={`px-2.5 py-1.5 rounded-md text-xs font-semibold cursor-pointer whitespace-nowrap ${
+                          unitFilterTab === 'single'
+                            ? 'bg-white text-zinc-900 shadow-xs'
+                            : 'text-zinc-600 hover:text-zinc-900'
+                        }`}
+                      >
+                        وحدة واحدة ({singleUnitCount})
+                      </button>
+                    </div>
+
+                    <div className="relative">
+                      <Search className="h-3.5 w-3.5 text-zinc-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={previewSearch}
+                        onChange={(e) => setPreviewSearch(e.target.value)}
+                        placeholder="بحث: شواية، مضغوط، بروست..."
+                        className="w-full sm:w-52 min-h-[34px] rounded-lg border border-zinc-200 bg-white pr-8 pl-2.5 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-[#D91B23] focus:outline-none"
+                      />
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -371,10 +666,14 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
                     القائمة الجانبية.
                   </p>
                 </div>
+              ) : visiblePreview.length === 0 ? (
+                <div className="p-6 text-center text-xs text-zinc-500">
+                  لا توجد أصناف مطابقة لخيار الفلترة أو البحث الحالي.
+                </div>
               ) : (
-                <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+                <div className="overflow-x-auto max-h-[440px] overflow-y-auto">
                   <table className="w-full text-right text-xs">
-                    <thead className="bg-zinc-50 border-b border-zinc-200 text-zinc-500 sticky top-0">
+                    <thead className="bg-zinc-50 border-b border-zinc-200 text-zinc-500 sticky top-0 z-10">
                       <tr>
                         <th className="px-3 py-2.5 w-9">
                           <input
@@ -385,74 +684,42 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
                             className="h-4 w-4 accent-[#D91B23] cursor-pointer"
                           />
                         </th>
-                        <th className="px-3 py-2.5 font-semibold">الصنف في الجرد</th>
-                        <th className="px-3 py-2.5 font-semibold">الكمية المستخرجة</th>
+                        <th className="px-3 py-2.5 font-semibold">الصنف وبنود الإكسل</th>
+                        <th className="px-3 py-2.5 font-semibold">
+                          الوحدات المفصولة (كامل / نص / ربع)
+                        </th>
+                        <th className="px-3 py-2.5 font-semibold">الصافي المعادل</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-100">
-                      {combinedPreview.map((row) => {
-                        const checked = !deselectedProductIds[row.product.id];
-                        const existingVal = existingSalesMap[row.product.id];
-                        const hasExisting = existingVal !== undefined && existingVal !== '';
-                        const breakdownText =
-                          row.effectiveUnits.length > 1
-                            ? formatBreakdownText(row.breakdown, row.effectiveUnits)
-                            : '';
-
-                        return (
-                          <tr
-                            key={row.product.id}
-                            className={checked ? 'hover:bg-zinc-50/80' : 'opacity-50 bg-zinc-50/40'}
-                          >
-                            <td className="px-3 py-2.5 align-top">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() =>
-                                  setDeselectedProductIds((prev) => ({
-                                    ...prev,
-                                    [row.product.id]: checked,
-                                  }))
-                                }
-                                aria-label={`استيراد ${row.product.name}`}
-                                className="h-4 w-4 mt-0.5 accent-[#D91B23] cursor-pointer"
-                              />
-                            </td>
-                            <td className="px-3 py-2.5 align-top">
-                              <div className="font-semibold text-zinc-900 text-sm">
-                                {row.product.name}
-                              </div>
-                              <div className="mt-0.5 text-[11px] text-zinc-500 flex flex-wrap items-center gap-x-1.5">
-                                <span>{MATCH_REASON_LABELS[row.matchReason]}</span>
-                                {row.excelNames.some((n) => n !== row.product.name) && (
-                                  <>
-                                    <span aria-hidden="true">·</span>
-                                    <span>من الملف: {row.excelNames.join('، ')}</span>
-                                  </>
-                                )}
-                              </div>
-                            </td>
-                            <td className="px-3 py-2.5 align-top tabular-nums">
-                              <div className="font-bold text-zinc-900 text-sm">
-                                {row.qty}{' '}
-                                <span className="font-normal text-xs text-zinc-500">
-                                  {row.product.unit}
-                                </span>
-                              </div>
-                              {breakdownText && (
-                                <div className="text-[11px] text-zinc-500 mt-0.5">
-                                  {breakdownText}
-                                </div>
-                              )}
-                              {hasExisting && (
-                                <div className="text-[11px] text-amber-700 mt-0.5">
-                                  الحالي في الجدول: {existingVal}
-                                </div>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
+                      {unitFilterTab === 'all' ? (
+                        <>
+                          {visibleMultiRows.length > 0 && (
+                            <tr className="bg-zinc-50/90 border-y border-zinc-200">
+                              <td
+                                colSpan={4}
+                                className="px-3 py-1.5 text-[11px] font-bold text-zinc-700"
+                              >
+                                أصناف متعددة الوحدات (حبة / نفر · نص · ربع) — {visibleMultiRows.length}
+                              </td>
+                            </tr>
+                          )}
+                          {visibleMultiRows.map(renderPreviewRow)}
+                          {visibleSingleRows.length > 0 && (
+                            <tr className="bg-zinc-50/90 border-y border-zinc-200">
+                              <td
+                                colSpan={4}
+                                className="px-3 py-1.5 text-[11px] font-bold text-zinc-700"
+                              >
+                                أصناف بوحدة واحدة — {visibleSingleRows.length}
+                              </td>
+                            </tr>
+                          )}
+                          {visibleSingleRows.map(renderPreviewRow)}
+                        </>
+                      ) : (
+                        visiblePreview.map(renderPreviewRow)
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -460,7 +727,7 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
             </div>
 
             {/* Side Panel: Unrecognized & Ignored */}
-            <div className="lg:col-span-5 space-y-4">
+            <div className="lg:col-span-4 space-y-4">
               <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
                 <div className="px-4 py-3 border-b border-zinc-100 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -476,9 +743,23 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
                     تم التعرف على جميع الأصناف ذات الكميات الصالحة في الملف.
                   </div>
                 ) : (
-                  <div className="divide-y divide-zinc-100 max-h-[300px] overflow-y-auto">
+                  <div className="divide-y divide-zinc-100 max-h-[340px] overflow-y-auto">
                     {analysis.unrecognized.map((item) => {
-                      const linkedId = manualLinks[item.rowKey] || '';
+                      const currentLink = manualLinks[item.rowKey];
+                      const linkedId = currentLink?.productId || '';
+                      const linkedProduct = linkedId ? productById.get(linkedId) : undefined;
+                      const linkedUnits = linkedProduct
+                        ? getEffectiveProductUnits(linkedProduct)
+                        : [];
+                      const selectedUnitName =
+                        currentLink?.unitName ||
+                        (linkedUnits.length > 0
+                          ? guessUnitOptionForText(
+                              item.rawUnitHint || item.excelName,
+                              linkedUnits
+                            )?.name || linkedUnits[0].name
+                          : '');
+
                       return (
                         <div key={item.rowKey} className="p-3 space-y-2">
                           <div className="flex items-start justify-between gap-2">
@@ -491,15 +772,36 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
                               </div>
                             </div>
                             <div className="text-xs font-bold text-zinc-800 tabular-nums shrink-0">
-                              الكمية: {item.extractedQty}
+                              العدد: {item.extractedQty}
                             </div>
                           </div>
 
                           <select
                             value={linkedId}
                             onChange={(e) => {
-                              const val = e.target.value;
-                              setManualLinks((prev) => ({ ...prev, [item.rowKey]: val }));
+                              const nextProdId = e.target.value;
+                              if (!nextProdId) {
+                                setManualLinks((prev) => {
+                                  const next = { ...prev };
+                                  delete next[item.rowKey];
+                                  return next;
+                                });
+                                return;
+                              }
+                              const p = productById.get(nextProdId);
+                              const pUnits = p ? getEffectiveProductUnits(p) : [];
+                              const guessed =
+                                guessUnitOptionForText(
+                                  item.rawUnitHint || item.excelName,
+                                  pUnits
+                                ) || pUnits[0];
+                              setManualLinks((prev) => ({
+                                ...prev,
+                                [item.rowKey]: {
+                                  productId: nextProdId,
+                                  unitName: guessed?.name,
+                                },
+                              }));
                             }}
                             aria-label={`ربط الصنف ${item.excelName}`}
                             className="w-full min-h-[36px] rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 text-xs text-zinc-700"
@@ -511,6 +813,33 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
                               </option>
                             ))}
                           </select>
+
+                          {linkedProduct && linkedUnits.length > 1 && (
+                            <label className="flex items-center justify-between gap-2 text-[11px] text-zinc-600">
+                              <span className="font-semibold whitespace-nowrap">وحدة البند:</span>
+                              <select
+                                value={selectedUnitName}
+                                onChange={(e) => {
+                                  const uName = e.target.value;
+                                  setManualLinks((prev) => ({
+                                    ...prev,
+                                    [item.rowKey]: {
+                                      productId: linkedProduct.id,
+                                      unitName: uName,
+                                    },
+                                  }));
+                                }}
+                                aria-label={`وحدة ${item.excelName}`}
+                                className="flex-1 min-h-[34px] rounded-lg border border-zinc-200 bg-white px-2 text-xs text-zinc-800"
+                              >
+                                {linkedUnits.map((u) => (
+                                  <option key={u.name} value={u.name}>
+                                    {u.name} (×{u.factor})
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          )}
                         </div>
                       );
                     })}
@@ -567,8 +896,8 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
               </span>
             ) : (
               <span>
-                ستُعبأ الكميات في جدول المبيعات للمراجعة، ولن تُحفظ في الجرد إلا بعد الضغط على حفظ
-                المسودة أو ترحيل التقرير.
+                ستُعبأ الكميات والأجزاء المفصولة (كامل/نص/ربع) في جدول المبيعات للمراجعة قبل الحفظ
+                أو الترحيل.
               </span>
             )}
           </div>
