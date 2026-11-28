@@ -32,6 +32,7 @@ import {
   ensureDepartmentReport,
   formatActionError,
   requestReportCorrection,
+  requestTransferReceiptCorrection,
   saveDepartmentReportDraft,
   submitDepartmentReport,
   technicalReviewProduct,
@@ -95,6 +96,7 @@ export const ProductionWorkspace: React.FC = () => {
   const [indNote, setIndNote] = useState('');
 
   const [techApprovals, setTechApprovals] = useState<ApprovalRequest[]>([]);
+  const [corrRequests, setCorrRequests] = useState<ApprovalRequest[]>([]);
   const [resultsReadOnly, setResultsReadOnly] = useState<ProductResult[]>([]);
 
   const [activeTab, setActiveTab] = useState<'receipts' | 'independent' | 'technical' | 'readonly'>(
@@ -104,7 +106,12 @@ export const ProductionWorkspace: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  const [corrOpen, setCorrOpen] = useState(false);
+  const [corrMode, setCorrMode] = useState<'independent' | 'transfer'>('independent');
   const [corrTarget, setCorrTarget] = useState<Product | null>(null);
+  const [corrTransfer, setCorrTransfer] = useState<FactoryTransfer | null>(null);
+  const [corrTransferItems, setCorrTransferItems] = useState<FactoryTransferItem[]>([]);
+  const [loadingCorrItems, setLoadingCorrItems] = useState(false);
   const [corrNewVal, setCorrNewVal] = useState('');
   const [corrCounts, setCorrCounts] = useState<Record<string, string>>({});
   const [corrReason, setCorrReason] = useState('');
@@ -113,6 +120,13 @@ export const ProductionWorkspace: React.FC = () => {
   const canReadResults = hasPermission('view_results');
   const isSessionClosed = currentSession?.status === 'closed';
   const isSubmitted = report ? report.status !== 'draft' : false;
+  const confirmedTransfers = useMemo(
+    () =>
+      transfers.filter(
+        (t) => t.status === 'received' || t.status === 'discrepancy_logged'
+      ),
+    [transfers]
+  );
 
   const approvedProducts = useMemo(
     () =>
@@ -144,6 +158,7 @@ export const ProductionWorkspace: React.FC = () => {
     setSelectedTransfer(null);
     setTransferItems([]);
     setIndEntries([]);
+    setCorrRequests([]);
 
     if (!account || !currentSession) return;
     let active = true;
@@ -225,6 +240,22 @@ export const ProductionWorkspace: React.FC = () => {
       (err) => handleFirestoreError(err, OperationType.LIST, 'approvals')
     );
 
+    const unsubCorr = onSnapshot(
+      query(collection(db, 'approvals'), where('sessionId', '==', currentSession.id)),
+      (snap) => {
+        const list = snap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as Omit<ApprovalRequest, 'id'>) }))
+          .filter((a) => a.type === 'report_correction' && a.department === 'production')
+          .sort((a, b) => {
+            const ta = (a.createdAt as { seconds?: number } | undefined)?.seconds ?? 0;
+            const tb = (b.createdAt as { seconds?: number } | undefined)?.seconds ?? 0;
+            return tb - ta;
+          });
+        setCorrRequests(list);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'approvals')
+    );
+
     let unsubRes = () => {};
     if (canReadResults) {
       unsubRes = onSnapshot(
@@ -245,11 +276,12 @@ export const ProductionWorkspace: React.FC = () => {
       unsubTrf();
       unsubInd();
       unsubApp();
+      unsubCorr();
       unsubRes();
     };
   }, [account?.uid, currentSession?.id, canReadResults]);
 
-  const getItemProductShape = (item: FactoryTransferItem) => {
+  const getItemProductShape = (item: FactoryTransferItem): Product => {
     const found = productMap.get(item.productId);
     if (found) return found;
     return {
@@ -257,9 +289,28 @@ export const ProductionWorkspace: React.FC = () => {
       name: item.productName,
       unit: item.unit,
       categoryId: '',
-      units: undefined,
+      allowedDepartments: ['factory', 'production'],
+      approvalStatus: 'approved',
+      isActive: true,
+      createdBy: '',
+      createdByName: '',
     };
   };
+
+  useEffect(() => {
+    if (!selectedTransfer) return;
+    const latest = transfers.find((t) => t.id === selectedTransfer.id);
+    if (!latest) return;
+    const prevUpdated = (selectedTransfer.updatedAt as { seconds?: number } | undefined)?.seconds;
+    const nextUpdated = (latest.updatedAt as { seconds?: number } | undefined)?.seconds;
+    if (
+      latest.status !== selectedTransfer.status ||
+      latest.totalReceivedQty !== selectedTransfer.totalReceivedQty ||
+      (latest.status !== 'pending_receipt' && nextUpdated !== prevUpdated)
+    ) {
+      void openTransferDetail(latest);
+    }
+  }, [transfers, selectedTransfer?.id]);
 
   const openTransferDetail = async (trf: FactoryTransfer) => {
     setSelectedTransfer(trf);
@@ -509,31 +560,160 @@ export const ProductionWorkspace: React.FC = () => {
     }
   };
 
+  const closeCorrectionModal = () => {
+    setCorrOpen(false);
+    setCorrTarget(null);
+    setCorrTransfer(null);
+    setCorrTransferItems([]);
+    setLoadingCorrItems(false);
+    setCorrNewVal('');
+    setCorrCounts({});
+    setCorrReason('');
+  };
+
+  const openIndependentCorrection = (preferredProduct?: Product | null) => {
+    const target =
+      preferredProduct ||
+      approvedProducts.find((p) => p.id === (indProdId || approvedProducts[0]?.id)) ||
+      approvedProducts[0] ||
+      null;
+    if (!target) {
+      setFeedback({ type: 'error', text: 'لا توجد أصناف معتمدة لطلب التصحيح عليها.' });
+      return;
+    }
+    const val = submittedIndMap[target.id] ?? 0;
+    setCorrMode('independent');
+    setCorrTransfer(null);
+    setCorrTransferItems([]);
+    setCorrTarget(target);
+    setCorrNewVal(String(val));
+    setCorrCounts(decomposeTotalToUnitCounts(val, getEffectiveProductUnits(target)));
+    setCorrReason('');
+    setCorrOpen(true);
+  };
+
+  const loadTransferItemsForCorrection = async (
+    trf: FactoryTransfer,
+    preferredProductId?: string
+  ) => {
+    setCorrTransfer(trf);
+    setLoadingCorrItems(true);
+    try {
+      let items: FactoryTransferItem[];
+      if (selectedTransfer?.id === trf.id && transferItems.length > 0) {
+        items = transferItems;
+      } else {
+        const snap = await getDocs(collection(db, 'factoryTransfers', trf.id, 'items'));
+        items = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<FactoryTransferItem, 'id'>),
+        }));
+      }
+      setCorrTransferItems(items);
+      const pickedItem =
+        (preferredProductId ? items.find((i) => i.productId === preferredProductId) : undefined) ||
+        items[0] ||
+        null;
+      if (pickedItem) {
+        const prodShape = getItemProductShape(pickedItem);
+        const val = pickedItem.receivedQty ?? pickedItem.sentQty;
+        setCorrTarget(prodShape);
+        setCorrNewVal(String(val));
+        setCorrCounts(
+          decomposeTotalToUnitCounts(
+            val,
+            getEffectiveProductUnits(prodShape),
+            pickedItem.receivedBreakdown ?? pickedItem.sentBreakdown
+          )
+        );
+      } else {
+        setCorrTarget(null);
+        setCorrNewVal('');
+        setCorrCounts({});
+      }
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: formatActionError(err, 'تعذر تحميل أصناف التوريد لطلب التصحيح.'),
+      });
+    } finally {
+      setLoadingCorrItems(false);
+    }
+  };
+
+  const openTransferCorrection = (
+    trf?: FactoryTransfer | null,
+    item?: FactoryTransferItem | null
+  ) => {
+    const targetTrf =
+      trf ||
+      (selectedTransfer &&
+      (selectedTransfer.status === 'received' || selectedTransfer.status === 'discrepancy_logged')
+        ? selectedTransfer
+        : confirmedTransfers[0]) ||
+      null;
+    if (!targetTrf) {
+      setFeedback({
+        type: 'error',
+        text: 'لا يوجد توريد مؤكد الاستلام لطلب التصحيح عليه.',
+      });
+      return;
+    }
+    setCorrMode('transfer');
+    setCorrReason('');
+    setCorrOpen(true);
+    void loadTransferItemsForCorrection(targetTrf, item?.productId);
+  };
+
   const handleRequestCorrection = async () => {
-    if (!account || !report || !corrTarget) return;
+    if (!account || !corrTarget) return;
     setBusy(true);
     setFeedback(null);
     try {
-      const oldV = submittedIndMap[corrTarget.id] ?? 0;
       const newV = Number(corrNewVal);
       if (Number.isNaN(newV) || newV < 0) throw new Error('أدخل كمية صحيحة.');
-      await requestReportCorrection(
-        account,
-        report,
-        corrTarget,
-        'independentProductionQty',
-        oldV,
-        newV,
-        corrReason
-      );
-      setCorrTarget(null);
-      setCorrNewVal('');
-      setCorrCounts({});
-      setCorrReason('');
-      setFeedback({
-        type: 'success',
-        text: 'تم إرسال طلب تصحيح الإنتاج المستقل إلى الإدارة العليا.',
-      });
+
+      if (corrMode === 'transfer') {
+        if (!corrTransfer) throw new Error('يرجى اختيار إشعار التوريد.');
+        const matchingItem = corrTransferItems.find((it) => it.productId === corrTarget.id);
+        const oldV = matchingItem ? matchingItem.receivedQty ?? matchingItem.sentQty : 0;
+        await requestTransferReceiptCorrection(
+          account,
+          corrTransfer,
+          corrTarget,
+          oldV,
+          roundQty(newV),
+          corrReason
+        );
+        closeCorrectionModal();
+        setFeedback({
+          type: 'success',
+          text: 'تم إرسال طلب تصحيح الكمية المستلمة من المعمل إلى الإدارة العليا.',
+        });
+      } else {
+        const activeReport =
+          report && report.sessionId === currentSession?.id
+            ? report
+            : currentSession
+            ? await ensureDepartmentReport(account, currentSession, 'production')
+            : null;
+        if (!activeReport) throw new Error('تقرير الإنتاج غير جاهز بعد.');
+        const oldV = submittedIndMap[corrTarget.id] ?? 0;
+        await requestReportCorrection(
+          account,
+          activeReport,
+          corrTarget,
+          'independentProductionQty',
+          oldV,
+          roundQty(newV),
+          corrReason
+        );
+        closeCorrectionModal();
+        setFeedback({
+          type: 'success',
+          text: 'تم إرسال طلب تصحيح الإنتاج المستقل إلى الإدارة العليا.',
+        });
+      }
     } catch (err) {
       setFeedback({
         type: 'error',
@@ -611,6 +791,24 @@ export const ProductionWorkspace: React.FC = () => {
             >
               <Send className="h-4 w-4" />
               <span>ترحيل تقرير الإنتاج</span>
+            </button>
+          )}
+          {!isDeptQtyReadOnly && !isSessionClosed && (isSubmitted || confirmedTransfers.length > 0) && (
+            <button
+              type="button"
+              onClick={() => {
+                if (activeTab === 'receipts' && confirmedTransfers.length > 0) {
+                  openTransferCorrection();
+                } else if (isSubmitted) {
+                  openIndependentCorrection();
+                } else {
+                  openTransferCorrection();
+                }
+              }}
+              className="min-h-[42px] inline-flex items-center gap-1.5 rounded-xl border border-[#D91B23]/30 bg-red-50 px-3.5 py-2 text-xs font-bold text-[#D91B23] hover:bg-red-100 cursor-pointer whitespace-nowrap"
+            >
+              <Edit3 className="h-3.5 w-3.5" />
+              <span>طلب تصحيح بعد الترحيل</span>
             </button>
           )}
           {isAdmin && (
@@ -822,6 +1020,12 @@ export const ProductionWorkspace: React.FC = () => {
                           <th className="px-3 py-3 font-semibold">مستلم (فعلي)</th>
                           <th className="px-3 py-3 font-semibold">فرق التسليم</th>
                           <th className="px-4 py-3 font-semibold">ملاحظة</th>
+                          {!isDeptQtyReadOnly &&
+                            !isSessionClosed &&
+                            (selectedTransfer.status === 'received' ||
+                              selectedTransfer.status === 'discrepancy_logged') && (
+                              <th className="px-3 py-3 font-semibold">تصحيح</th>
+                            )}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-zinc-100 text-sm">
@@ -840,6 +1044,11 @@ export const ProductionWorkspace: React.FC = () => {
                                 ? item.receivedBreakdown
                                 : item.sentBreakdown
                             );
+                          const canCorrectRow =
+                            !isDeptQtyReadOnly &&
+                            !isSessionClosed &&
+                            (selectedTransfer.status === 'received' ||
+                              selectedTransfer.status === 'discrepancy_logged');
                           return (
                             <tr key={item.productId}>
                               <td className="px-4 py-3 font-semibold text-zinc-900">
@@ -914,6 +1123,18 @@ export const ProductionWorkspace: React.FC = () => {
                                   />
                                 )}
                               </td>
+                              {canCorrectRow && (
+                                <td className="px-3 py-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => openTransferCorrection(selectedTransfer, item)}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-[#D91B23]/30 bg-red-50 px-2.5 py-1.5 text-xs font-semibold text-[#D91B23] hover:bg-red-100 cursor-pointer whitespace-nowrap"
+                                  >
+                                    <Edit3 className="h-3.5 w-3.5" />
+                                    <span>تصحيح</span>
+                                  </button>
+                                </td>
+                              )}
                             </tr>
                           );
                         })}
@@ -942,6 +1163,25 @@ export const ProductionWorkspace: React.FC = () => {
                     </button>
                   </div>
                 )}
+
+                {!isDeptQtyReadOnly &&
+                  (selectedTransfer.status === 'received' ||
+                    selectedTransfer.status === 'discrepancy_logged') &&
+                  !isSessionClosed && (
+                    <div className="p-4 border-t border-zinc-100 bg-zinc-50/50 flex flex-wrap items-center justify-between gap-3">
+                      <span className="text-xs text-zinc-600">
+                        تم تأكيد استلام هذا التوريد. إذا أخطأت في الكمية المستلمة يمكنك رفع طلب تصحيح للإدارة.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => openTransferCorrection(selectedTransfer)}
+                        className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl border border-[#D91B23]/30 bg-white px-3.5 py-1.5 text-xs font-bold text-[#D91B23] hover:bg-red-50 cursor-pointer whitespace-nowrap"
+                      >
+                        <Edit3 className="h-3.5 w-3.5" />
+                        <span>طلب تصحيح كمية مستلمة</span>
+                      </button>
+                    </div>
+                  )}
               </div>
             )}
           </div>
@@ -1045,20 +1285,7 @@ export const ProductionWorkspace: React.FC = () => {
               {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && (
                 <button
                   type="button"
-                  onClick={() => {
-                    const target =
-                      approvedProducts.find((p) => p.id === (indProdId || approvedProducts[0]?.id)) ||
-                      approvedProducts[0] ||
-                      null;
-                    if (target) {
-                      const val = submittedIndMap[target.id] ?? 0;
-                      setCorrTarget(target);
-                      setCorrNewVal(String(val));
-                      setCorrCounts(
-                        decomposeTotalToUnitCounts(val, getEffectiveProductUnits(target))
-                      );
-                    }
-                  }}
+                  onClick={() => openIndependentCorrection()}
                   className="inline-flex items-center gap-1 text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer"
                 >
                   <Edit3 className="h-3.5 w-3.5" />
@@ -1066,6 +1293,42 @@ export const ProductionWorkspace: React.FC = () => {
                 </button>
               )}
             </div>
+            {isSubmitted && Object.keys(submittedIndMap).length > 0 && (
+              <div className="px-5 py-3.5 border-b border-zinc-100 bg-emerald-50/40">
+                <div className="text-xs font-bold text-emerald-900 mb-2">
+                  الأرصدة المعتمدة في التقرير المرحّل (تتحدث تلقائياً عند اعتماد أي تصحيح):
+                </div>
+                <div className="divide-y divide-emerald-100 rounded-xl border border-emerald-200 bg-white">
+                  {Object.entries(submittedIndMap).map(([prodId, qty]) => {
+                    const p = productMap.get(prodId);
+                    if (!p) return null;
+                    return (
+                      <div
+                        key={prodId}
+                        className="px-3.5 py-2 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <span className="font-bold text-zinc-900">{p.name}</span>
+                        <div className="flex items-center gap-3">
+                          <span className="font-extrabold text-emerald-700 tabular-nums">
+                            {qty} {p.unit}
+                          </span>
+                          {!isDeptQtyReadOnly && !isSessionClosed && (
+                            <button
+                              type="button"
+                              onClick={() => openIndependentCorrection(p)}
+                              className="inline-flex items-center gap-1 font-semibold text-[#D91B23] hover:underline cursor-pointer"
+                            >
+                              <Edit3 className="h-3 w-3" />
+                              <span>تصحيح</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {indEntries.length === 0 ? (
               <div className="p-8 text-center text-sm text-zinc-500">
                 لا توجد سجلات إنتاج مستقل لهذا التاريخ.
@@ -1101,14 +1364,7 @@ export const ProductionWorkspace: React.FC = () => {
                         {!isDeptQtyReadOnly && isSubmitted && !isSessionClosed && p && (
                           <button
                             type="button"
-                            onClick={() => {
-                              const val = submittedIndMap[p.id] ?? entry.qty;
-                              setCorrTarget(p);
-                              setCorrNewVal(String(val));
-                              setCorrCounts(
-                                decomposeTotalToUnitCounts(val, getEffectiveProductUnits(p))
-                              );
-                            }}
+                            onClick={() => openIndependentCorrection(p)}
                             className="inline-flex items-center gap-1 text-xs font-semibold text-[#D91B23] hover:underline cursor-pointer"
                           >
                             <Edit3 className="h-3.5 w-3.5" />
@@ -1241,6 +1497,76 @@ export const ProductionWorkspace: React.FC = () => {
         </div>
       )}
 
+      {corrRequests.length > 0 && (
+        <div className="bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-base font-bold text-zinc-900 font-display">
+                طلبات التصحيح المرسلة للإدارة ({corrRequests.length})
+              </h3>
+              <p className="text-xs text-zinc-500">
+                متابعة حالة طلبات تصحيح الكميات المستلمة والإنتاج المستقل بعد الترحيل.
+              </p>
+            </div>
+          </div>
+          <div className="divide-y divide-zinc-100">
+            {corrRequests.map((req) => {
+              const reqProd = req.productId ? productMap.get(req.productId) : undefined;
+              const isTransferCorr = req.targetCollection === 'factoryTransfers';
+              return (
+                <div
+                  key={req.id}
+                  className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-700">
+                        {isTransferCorr ? 'استلام توريد المعمل' : 'الإنتاج المستقل'}
+                      </span>
+                      {reqProd && (
+                        <span className="text-sm font-bold text-zinc-900">{reqProd.name}</span>
+                      )}
+                      <span className="text-xs font-bold text-zinc-700 tabular-nums">
+                        السابق: {req.oldValue ?? 0} ← الجديد: {req.newValue ?? 0}{' '}
+                        {reqProd?.unit || ''}
+                      </span>
+                    </div>
+                    <p className="text-xs text-zinc-600">{req.reason}</p>
+                    <div className="text-[11px] text-zinc-400">
+                      مقدم الطلب: {req.requestedByName} · {formatTimestampAden(req.createdAt)}
+                      {req.reviewNote ? ` · رد الإدارة: ${req.reviewNote}` : ''}
+                    </div>
+                  </div>
+                  <StatusBadge
+                    label={
+                      req.status === 'pending'
+                        ? 'بانتظار الإدارة'
+                        : req.status === 'approved'
+                        ? 'معتمد'
+                        : 'مرفوض'
+                    }
+                    tone={
+                      req.status === 'pending'
+                        ? 'warning'
+                        : req.status === 'approved'
+                        ? 'success'
+                        : 'danger'
+                    }
+                    icon={
+                      req.status === 'pending'
+                        ? 'clock'
+                        : req.status === 'approved'
+                        ? 'check'
+                        : 'error'
+                    }
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <ConfirmDialog
         open={confirmSubmitOpen}
         title="تأكيد ترحيل تقرير الإنتاج"
@@ -1252,51 +1578,184 @@ export const ProductionWorkspace: React.FC = () => {
         onCancel={() => setConfirmSubmitOpen(false)}
       />
 
-      {corrTarget && (
+      {corrOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white border border-zinc-200 p-6 space-y-4">
-            <h3 className="text-lg font-bold text-zinc-900 font-display">
-              طلب تصحيح الإنتاج المستقل — {corrTarget.name}
-            </h3>
-            <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1">الصنف</label>
-              <select
-                value={corrTarget.id}
-                onChange={(e) => {
-                  const found = approvedProducts.find((p) => p.id === e.target.value);
-                  if (found) {
-                    const val = submittedIndMap[found.id] ?? 0;
-                    setCorrTarget(found);
-                    setCorrNewVal(String(val));
-                    setCorrCounts(
-                      decomposeTotalToUnitCounts(val, getEffectiveProductUnits(found))
-                    );
-                  }
-                }}
-                className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
+          <div className="w-full max-w-lg rounded-2xl bg-white border border-zinc-200 p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-lg font-bold text-zinc-900 font-display">
+                طلب تصحيح بعد الترحيل — قسم الإنتاج
+              </h3>
+              <button
+                type="button"
+                onClick={closeCorrectionModal}
+                className="text-xs font-semibold text-zinc-500 hover:text-zinc-900 cursor-pointer"
               >
-                {approvedProducts.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
+                إغلاق
+              </button>
             </div>
-            <div>
-              <label className="block text-xs font-semibold text-zinc-700 mb-1.5">
-                الكمية الجديدة للإنتاج المستقل
-              </label>
-              <MultiUnitQtyInput
-                product={corrTarget}
-                counts={corrCounts}
-                totalValue={corrNewVal}
-                fullWidth
-                onChange={(nextCounts, nextTotalStr) => {
-                  setCorrCounts(nextCounts);
-                  setCorrNewVal(nextTotalStr);
-                }}
-              />
-            </div>
+
+            {isSubmitted && confirmedTransfers.length > 0 && (
+              <div className="grid grid-cols-2 gap-1.5 p-1 bg-zinc-100 rounded-xl border border-zinc-200">
+                <button
+                  type="button"
+                  onClick={() => openTransferCorrection(corrTransfer)}
+                  className={`min-h-[38px] rounded-lg px-3 text-xs font-bold cursor-pointer ${
+                    corrMode === 'transfer'
+                      ? 'bg-white text-zinc-900 shadow-sm'
+                      : 'text-zinc-600'
+                  }`}
+                >
+                  استلام توريد من المعمل
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openIndependentCorrection()}
+                  className={`min-h-[38px] rounded-lg px-3 text-xs font-bold cursor-pointer ${
+                    corrMode === 'independent'
+                      ? 'bg-white text-zinc-900 shadow-sm'
+                      : 'text-zinc-600'
+                  }`}
+                >
+                  الإنتاج المستقل
+                </button>
+              </div>
+            )}
+
+            {corrMode === 'transfer' ? (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    إشعار التوريد
+                  </label>
+                  <select
+                    value={corrTransfer?.id || ''}
+                    onChange={(e) => {
+                      const foundTrf = confirmedTransfers.find((t) => t.id === e.target.value);
+                      if (foundTrf) {
+                        void loadTransferItemsForCorrection(foundTrf);
+                      }
+                    }}
+                    className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
+                  >
+                    {confirmedTransfers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.transferNumber} (مستلم حالي: {t.totalReceivedQty})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {loadingCorrItems ? (
+                  <div className="py-4 text-center text-xs text-zinc-500">
+                    جاري تحميل أصناف التوريد...
+                  </div>
+                ) : corrTransferItems.length === 0 ? (
+                  <div className="py-4 text-center text-xs text-zinc-500">
+                    لا توجد أصناف داخل هذا التوريد.
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                        الصنف داخل التوريد
+                      </label>
+                      <select
+                        value={corrTarget?.id || ''}
+                        onChange={(e) => {
+                          const foundItem = corrTransferItems.find(
+                            (it) => it.productId === e.target.value
+                          );
+                          if (foundItem) {
+                            const shape = getItemProductShape(foundItem);
+                            const val = foundItem.receivedQty ?? foundItem.sentQty;
+                            setCorrTarget(shape);
+                            setCorrNewVal(String(val));
+                            setCorrCounts(
+                              decomposeTotalToUnitCounts(
+                                val,
+                                getEffectiveProductUnits(shape),
+                                foundItem.receivedBreakdown ?? foundItem.sentBreakdown
+                              )
+                            );
+                          }
+                        }}
+                        className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
+                      >
+                        {corrTransferItems.map((it) => (
+                          <option key={it.productId} value={it.productId}>
+                            {it.productName} (مرسل: {it.sentQty} · مستلم حالي:{' '}
+                            {it.receivedQty ?? it.sentQty})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {corrTarget && (
+                      <div>
+                        <label className="block text-xs font-semibold text-zinc-700 mb-1.5">
+                          الكمية المستلمة الصحيحة
+                        </label>
+                        <MultiUnitQtyInput
+                          product={corrTarget}
+                          counts={corrCounts}
+                          totalValue={corrNewVal}
+                          fullWidth
+                          onChange={(nextCounts, nextTotalStr) => {
+                            setCorrCounts(nextCounts);
+                            setCorrNewVal(nextTotalStr);
+                          }}
+                        />
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">الصنف</label>
+                  <select
+                    value={corrTarget?.id || ''}
+                    onChange={(e) => {
+                      const found = approvedProducts.find((p) => p.id === e.target.value);
+                      if (found) {
+                        const val = submittedIndMap[found.id] ?? 0;
+                        setCorrTarget(found);
+                        setCorrNewVal(String(val));
+                        setCorrCounts(
+                          decomposeTotalToUnitCounts(val, getEffectiveProductUnits(found))
+                        );
+                      }
+                    }}
+                    className="w-full min-h-[42px] rounded-xl border border-zinc-200 px-3 text-sm"
+                  >
+                    {approvedProducts.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} (المسجل: {submittedIndMap[p.id] ?? 0})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {corrTarget && (
+                  <div>
+                    <label className="block text-xs font-semibold text-zinc-700 mb-1.5">
+                      الكمية الجديدة للإنتاج المستقل
+                    </label>
+                    <MultiUnitQtyInput
+                      product={corrTarget}
+                      counts={corrCounts}
+                      totalValue={corrNewVal}
+                      fullWidth
+                      onChange={(nextCounts, nextTotalStr) => {
+                        setCorrCounts(nextCounts);
+                        setCorrNewVal(nextTotalStr);
+                      }}
+                    />
+                  </div>
+                )}
+              </>
+            )}
+
             <div>
               <label className="block text-xs font-semibold text-zinc-700 mb-1">سبب التعديل</label>
               <textarea
@@ -1310,18 +1769,18 @@ export const ProductionWorkspace: React.FC = () => {
             <div className="flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setCorrTarget(null)}
+                onClick={closeCorrectionModal}
                 className="min-h-[40px] px-4 rounded-xl border border-zinc-200 text-xs font-semibold text-zinc-700 cursor-pointer"
               >
                 إلغاء
               </button>
               <button
                 type="button"
-                disabled={busy || !corrReason.trim()}
+                disabled={busy || loadingCorrItems || !corrTarget || !corrReason.trim()}
                 onClick={() => void handleRequestCorrection()}
                 className="min-h-[40px] px-5 rounded-xl bg-[#D91B23] text-xs font-bold text-white cursor-pointer disabled:opacity-50"
               >
-                إرسال الطلب للإدارة
+                {busy ? 'جاري الإرسال...' : 'إرسال الطلب للإدارة'}
               </button>
             </div>
           </div>

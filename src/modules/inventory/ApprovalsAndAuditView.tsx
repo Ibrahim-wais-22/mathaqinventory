@@ -150,9 +150,31 @@ export const ApprovalsAndAuditView: React.FC = () => {
                   </div>
                   <div className="text-sm font-semibold text-zinc-900">{app.reason}</div>
                   {app.type === 'report_correction' && (
-                    <div className="text-xs text-zinc-600 tabular-nums">
-                      القيمة السابقة: <strong>{app.oldValue ?? 0}</strong> ← القيمة الجديدة:{' '}
-                      <strong className="text-[#D91B23]">{app.newValue ?? 0}</strong>
+                    <div className="text-xs text-zinc-600 tabular-nums flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      {app.fieldKey && (
+                        <span className="font-semibold text-zinc-700">
+                          {app.fieldKey === 'receivedQty'
+                            ? 'الكمية المستلمة من المعمل'
+                            : app.fieldKey === 'independentProductionQty'
+                            ? 'الإنتاج المستقل'
+                            : app.fieldKey === 'salesQty'
+                            ? 'المبيعات'
+                            : app.fieldKey === 'damagedQty'
+                            ? 'التالف'
+                            : app.fieldKey === 'validRemainingQty'
+                            ? 'المتبقي الصالح'
+                            : app.fieldKey === 'invalidRemainingQty'
+                            ? 'المتبقي غير الصالح'
+                            : app.fieldKey === 'preparedQty'
+                            ? 'كمية المعمل'
+                            : app.fieldKey}
+                          :
+                        </span>
+                      )}
+                      <span>
+                        القيمة السابقة: <strong>{app.oldValue ?? 0}</strong> ← القيمة الجديدة:{' '}
+                        <strong className="text-[#D91B23]">{app.newValue ?? 0}</strong>
+                      </span>
                     </div>
                   )}
                   <div className="text-[11px] text-zinc-400">

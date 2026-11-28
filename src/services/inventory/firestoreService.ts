@@ -2369,6 +2369,56 @@ export async function requestReportCorrection(
   }
 }
 
+export async function requestTransferReceiptCorrection(
+  actor: UserAccount,
+  transfer: FactoryTransfer,
+  product: Pick<Product, 'id' | 'name' | 'unit'>,
+  oldValue: number | null,
+  newValue: number,
+  reason: string
+): Promise<void> {
+  if (!reason.trim()) {
+    throw new Error('يجب كتابة سبب التعديل المطلوب.');
+  }
+  const approvalId = makeUniqueId('corr');
+  const reasonSummary = `توريد ${transfer.transferNumber} — ${product.name}: ${reason.trim()}`;
+  try {
+    await setDoc(doc(db, 'approvals', approvalId), {
+      type: 'report_correction',
+      sessionId: transfer.sessionId,
+      inventoryDate: transfer.inventoryDate,
+      targetCollection: 'factoryTransfers',
+      targetId: transfer.id,
+      productId: product.id,
+      department: 'production',
+      status: 'pending',
+      reason: reasonSummary.slice(0, 500),
+      fieldKey: 'receivedQty',
+      oldValue: oldValue ?? 0,
+      newValue: safeNum(newValue),
+      requestedBy: actor.uid,
+      requestedByName: actor.fullName,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    await appendAuditLog({
+      actor,
+      action: 'طلب_تصحيح_استلام_توريد',
+      targetCollection: 'approvals',
+      targetId: approvalId,
+      sessionId: transfer.sessionId,
+      inventoryDate: transfer.inventoryDate,
+      department: 'production',
+      oldValueSummary: `${transfer.transferNumber} · ${product.name}: ${oldValue ?? 0}`,
+      newValueSummary: `${transfer.transferNumber} · ${product.name}: ${safeNum(newValue)}`,
+      reason: reason.trim(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `approvals/${approvalId}`);
+  }
+}
+
 export async function reviewReportCorrection(
   actor: UserAccount,
   approval: ApprovalRequest,
@@ -2387,13 +2437,96 @@ export async function reviewReportCorrection(
       updatedAt: serverTimestamp(),
     });
 
-    if (decision === 'approve' && approval.productId && approval.fieldKey) {
+    if (
+      decision === 'approve' &&
+      approval.targetCollection === 'factoryTransfers' &&
+      approval.productId &&
+      approval.fieldKey === 'receivedQty'
+    ) {
+      const trfRef = doc(db, 'factoryTransfers', approval.targetId);
+      const trfSnap = await getDoc(trfRef);
+      if (!trfSnap.exists()) {
+        throw new Error('تعذر العثور على إشعار التوريد المرتبط بطلب التصحيح.');
+      }
+      const trfItemsSnap = await getDocs(
+        collection(db, 'factoryTransfers', approval.targetId, 'items')
+      );
+      const targetItemDoc = trfItemsSnap.docs.find((d) => d.id === approval.productId);
+      if (!targetItemDoc) {
+        throw new Error('تعذر العثور على الصنف داخل إشعار التوريد.');
+      }
+
+      const newReceived = safeNum(approval.newValue ?? 0);
+      const prod = products.find((p) => p.id === approval.productId);
+      const effUnits = getEffectiveProductUnits(prod);
+      const nextCounts = decomposeTotalToUnitCounts(newReceived, effUnits);
+      const nextBreakdown: UnitBreakdown = {};
+      for (const u of effUnits) {
+        const c = Number(nextCounts[u.name] || 0);
+        if (c > 0) nextBreakdown[u.name] = roundQty(c);
+      }
+      const cleanBreakdown = sanitizeUnitBreakdown(nextBreakdown);
+
+      let totalReceivedQty = 0;
+      let totalVarianceQty = 0;
+      let hasDiscrepancy = false;
+
+      trfItemsSnap.forEach((d) => {
+        const it = d.data() as FactoryTransferItem;
+        const sent = safeNum(it.sentQty);
+        const rec = d.id === approval.productId ? newReceived : safeNum(it.receivedQty ?? 0);
+        const variance = roundQty(sent - rec);
+        if (variance !== 0) hasDiscrepancy = true;
+        totalReceivedQty = roundQty(totalReceivedQty + rec);
+        totalVarianceQty = roundQty(totalVarianceQty + variance);
+
+        if (d.id === approval.productId) {
+          batch.update(d.ref, {
+            receivedQty: rec,
+            receivedBreakdown: cleanBreakdown ?? null,
+            varianceQty: variance,
+            note: `تصحيح معتمد: ${approval.reason}`.slice(0, 300),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      });
+
+      batch.update(trfRef, {
+        status: hasDiscrepancy ? 'discrepancy_logged' : 'received',
+        totalReceivedQty,
+        totalVarianceQty,
+        productionNote: `تصحيح استلام معتمد: ${approval.reason}`.slice(0, 400),
+        updatedAt: serverTimestamp(),
+      });
+    } else if (decision === 'approve' && approval.productId && approval.fieldKey) {
       const itemRef = doc(db, 'departmentReports', approval.targetId, 'items', approval.productId);
       const itemSnap = await getDoc(itemRef);
       const prod = products.find((p) => p.id === approval.productId);
+      const newQty = safeNum(approval.newValue ?? 0);
+      const effUnits = getEffectiveProductUnits(prod);
+      const nextCounts = decomposeTotalToUnitCounts(newQty, effUnits);
+      const nextFieldBreakdown: UnitBreakdown = {};
+      for (const u of effUnits) {
+        const c = Number(nextCounts[u.name] || 0);
+        if (c > 0) nextFieldBreakdown[u.name] = roundQty(c);
+      }
+      const cleanFieldBreakdown = sanitizeUnitBreakdown(nextFieldBreakdown);
+      const fieldKey = approval.fieldKey as ReportQtyFieldKey;
+
       if (itemSnap.exists()) {
+        const existingData = itemSnap.data() as DepartmentReportItem;
+        const nextUnitBreakdowns: Partial<Record<ReportQtyFieldKey, UnitBreakdown>> = {
+          ...(existingData.unitBreakdowns || {}),
+        };
+        if (cleanFieldBreakdown) {
+          nextUnitBreakdowns[fieldKey] = cleanFieldBreakdown;
+        } else {
+          delete nextUnitBreakdowns[fieldKey];
+        }
         batch.update(itemRef, {
-          [approval.fieldKey]: safeNum(approval.newValue ?? 0),
+          [approval.fieldKey]: newQty,
+          unitBreakdowns:
+            Object.keys(nextUnitBreakdowns).length > 0 ? nextUnitBreakdowns : null,
           updatedBy: actor.uid,
           updatedByName: actor.fullName,
           updatedAt: serverTimestamp(),
@@ -2407,7 +2540,8 @@ export async function reviewReportCorrection(
           department: approval.department,
           productId: prod.id,
           categoryId: prod.categoryId,
-          [approval.fieldKey]: safeNum(approval.newValue ?? 0),
+          [approval.fieldKey]: newQty,
+          unitBreakdowns: cleanFieldBreakdown ? { [fieldKey]: cleanFieldBreakdown } : null,
           note: `تصحيح معتمد: ${approval.reason}`.slice(0, 300),
           updatedBy: actor.uid,
           updatedByName: actor.fullName,

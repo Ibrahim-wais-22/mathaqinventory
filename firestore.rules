@@ -599,7 +599,7 @@ service cloud.firestore {
             isAdmin() &&
             incoming().branchId == existing().branchId &&
             exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['sessionId', 'inventoryDate', 'factoryNote', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['sessionId', 'inventoryDate', 'status', 'totalReceivedQty', 'totalVarianceQty', 'factoryNote', 'productionNote', 'updatedAt'])
           ) ||
           (
             incoming().sessionId == existing().sessionId &&
@@ -659,7 +659,7 @@ service cloud.firestore {
               isAdmin() &&
               exists(/databases/$(database)/documents/factoryTransfers/$(transferId)) &&
               exists(/databases/$(database)/documents/dailySessions/$(incoming().sessionId)) &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['sessionId', 'updatedAt'])
+              incoming().diff(existing()).affectedKeys().hasOnly(['sessionId', 'receivedQty', 'receivedBreakdown', 'varianceQty', 'note', 'updatedAt'])
             ) ||
             (
               incoming().sessionId == existing().sessionId &&
