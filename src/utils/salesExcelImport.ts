@@ -179,6 +179,11 @@ const TOKEN_CANONICAL_ALIASES: Record<string, string> = {
   شوايا: 'شوايه',
   مضغوطه: 'مضغوط',
   حنيذه: 'حنيذ',
+  انفار: 'نفر',
+  نفرات: 'نفر',
+  ذبائح: 'ذبيحه',
+  ذبايح: 'ذبيحه',
+  ذبيح: 'ذبيحه',
   نصف: 'نص',
   half: 'نص',
   quarter: 'ربع',
@@ -244,7 +249,10 @@ export function parseArabicNumber(value: unknown): number | null {
 
   // Remove harmless trailing unit/currency text if preceded by a pure number
   const unitCleaned = raw
-    .replace(/(حبه|حبة|نفر|صحن|علبه|علبة|برام|كيلو|وحدة|وحده|قطعه|قطعة|نص|ربع|pcs|unit|units|qty)/gi, '')
+    .replace(
+      /(حبه|حبة|نفرين|نفرات|انفار|أنفار|نفر|ذبيحه|ذبيحة|ذبيحتين|صحن|علبه|علبة|برام|كيلو|وحدة|وحده|قطعه|قطعة|نص|ربع|pcs|unit|units|qty)/gi,
+      ''
+    )
     .trim();
   if (unitCleaned) raw = unitCleaned;
 
@@ -641,6 +649,10 @@ const PROTEIN_TOKEN_TO_GROUP: Record<string, string> = {
   عجل: 'meat',
   بقر: 'meat',
   ضان: 'meat',
+  ذبيحه: 'meat',
+  ذبيحتين: 'meat',
+  ذبائح: 'meat',
+  مفطح: 'meat',
   سمك: 'fish',
   كنعد: 'fish',
   هامور: 'fish',
@@ -653,8 +665,11 @@ const GENERIC_NON_UNIQUE_TOKENS = new Set([
   'دجاج',
   'لحم',
   'سمك',
+  'ذبيحه',
+  'ذبيحتين',
   'حبه',
   'نفر',
+  'نفرين',
   'نص',
   'ربع',
   'كامل',
@@ -758,6 +773,82 @@ interface IndexedProduct {
   unitMatchers: Array<{ normUnit: string; option: ProductUnitOption }>;
 }
 
+const NAFAR_PER_CARCASS = 16;
+const DEFAULT_NAFAR_PER_CARCASS_FACTOR = 1 / NAFAR_PER_CARCASS; // 0.0625 (4 أنفار = 0.25 ربع ذبيحة، 16 نفر = 1 ذبيحة)
+
+export function isCarcassUnitName(unitName?: string): boolean {
+  const norm = normalizeArabicText(unitName || '');
+  return norm === 'ذبيحه' || norm === 'ذبائح';
+}
+
+export function isCarcassProduct(
+  product: Pick<Product, 'unit' | 'units'> | Pick<IndexedProduct, 'product' | 'effectiveUnits'>
+): boolean {
+  if ('product' in product) {
+    return (
+      isCarcassUnitName(product.product.unit) ||
+      product.effectiveUnits.some((u) => isCarcassUnitName(u.name) && Math.abs(u.factor - 1) < 0.001)
+    );
+  }
+  return (
+    isCarcassUnitName(product.unit) ||
+    (Array.isArray(product.units) &&
+      product.units.some((u) => isCarcassUnitName(u.name) && Math.abs(u.factor - 1) < 0.001))
+  );
+}
+
+export function isMandiMeatProduct(
+  product: Pick<Product, 'name' | 'unit' | 'units' | 'categoryId'>
+): boolean {
+  if (product.categoryId === 'cat_chicken') return false;
+  const norm = normalizeArabicText(product.name);
+  const tokens = tokenizeNormalized(norm, true);
+  const sig = extractDomainSignature(tokens);
+  if (!sig.styles.has('mandi')) return false;
+  if (sig.proteins.has('chicken') || sig.proteins.has('fish')) return false;
+  if (sig.proteins.has('meat')) return true;
+  return product.categoryId === 'cat_meats' && isCarcassProduct(product);
+}
+
+function getNafarPhraseMultiplier(phrase: string): number | null {
+  const tokens = tokenizeNormalized(normalizeArabicText(phrase), true);
+  if (tokens.length === 1 && tokens[0] === 'نفر') return 1;
+  if (tokens.length === 1 && tokens[0] === 'نفرين') return 2;
+  if (tokens.length === 2 && tokens[0] === 'نفر' && (tokens[1] === 'كامل' || tokens[1] === 'كامله')) {
+    return 1;
+  }
+  if (tokens.length === 2 && tokens[0] === 'نص' && tokens[1] === 'نفر') return 0.5;
+  if (tokens.length === 2 && tokens[0] === 'ربع' && tokens[1] === 'نفر') return 0.25;
+  return null;
+}
+
+function getCarcassPhraseMultiplier(phrase: string): number | null {
+  const tokens = tokenizeNormalized(normalizeArabicText(phrase), true);
+  if (tokens.length === 1 && tokens[0] === 'ذبيحه') return 1;
+  if (tokens.length === 1 && tokens[0] === 'ذبيحتين') return 2;
+  if (tokens.length === 2 && tokens[0] === 'ذبيحه' && (tokens[1] === 'كامل' || tokens[1] === 'كامله')) {
+    return 1;
+  }
+  if (tokens.length === 2 && tokens[0] === 'نص' && tokens[1] === 'ذبيحه') return 0.5;
+  if (tokens.length === 2 && tokens[0] === 'ربع' && tokens[1] === 'ذبيحه') return 0.25;
+  return null;
+}
+
+function inferUnitProteinHint(phrase?: string): 'meat' | 'chicken' | null {
+  if (!phrase) return null;
+  // Only unambiguous carcass phrases (ذبيحة / نص ذبيحة / ربع ذبيحة) imply meat;
+  // plain "نفر مندي" without "لحم" or "دجاج" is never auto-guessed when both exist.
+  if (getCarcassPhraseMultiplier(phrase) !== null) {
+    return 'meat';
+  }
+  const tokens = tokenizeNormalized(normalizeArabicText(phrase), true);
+  const joined = tokens.join(' ');
+  if (joined === 'حبه' || joined === 'حبتين' || joined === 'نص حبه' || joined === 'ربع حبه') {
+    return 'chicken';
+  }
+  return null;
+}
+
 interface UnitPhraseDef {
   tokens: string[];
   phrase: string;
@@ -765,6 +856,11 @@ interface UnitPhraseDef {
 }
 
 const GENERIC_UNIT_PHRASES: UnitPhraseDef[] = [
+  { tokens: ['نص', 'ذبيحه'], phrase: 'نص ذبيحه', factor: 0.5 },
+  { tokens: ['ربع', 'ذبيحه'], phrase: 'ربع ذبيحه', factor: 0.25 },
+  { tokens: ['ذبيحه', 'كامل'], phrase: 'ذبيحه كامل', factor: 1 },
+  { tokens: ['ذبيحه', 'كامله'], phrase: 'ذبيحه كامله', factor: 1 },
+  { tokens: ['ذبيحتين'], phrase: 'ذبيحتين', factor: 2 },
   { tokens: ['نص', 'نفر'], phrase: 'نص نفر', factor: 0.5 },
   { tokens: ['ربع', 'نفر'], phrase: 'ربع نفر', factor: 0.25 },
   { tokens: ['نص', 'حبه'], phrase: 'نص حبه', factor: 0.5 },
@@ -774,6 +870,7 @@ const GENERIC_UNIT_PHRASES: UnitPhraseDef[] = [
   { tokens: ['نفر', 'كامل'], phrase: 'نفر كامل', factor: 1 },
   { tokens: ['حبتين'], phrase: 'حبتين', factor: 2 },
   { tokens: ['نفرين'], phrase: 'نفرين', factor: 2 },
+  { tokens: ['ذبيحه'], phrase: 'ذبيحه', factor: 1 },
   { tokens: ['نص'], phrase: 'نص', factor: 0.5 },
   { tokens: ['ربع'], phrase: 'ربع', factor: 0.25 },
   { tokens: ['حبه'], phrase: 'حبه', factor: 1 },
@@ -789,6 +886,14 @@ function buildProductIndex(products: Product[]): IndexedProduct[] {
     const tokens = tokenizeNormalized(normName, false);
     const noAlTokens = tokenizeNormalized(normName, true);
     const domain = extractDomainSignature(noAlTokens);
+    // Fallback protein classification from catalog category/unit when name omits دجاج/لحم
+    if (domain.proteins.size === 0) {
+      if (product.categoryId === 'cat_chicken') {
+        domain.proteins.add('chicken');
+      } else if (product.categoryId === 'cat_meats' || isCarcassProduct(product)) {
+        domain.proteins.add('meat');
+      }
+    }
 
     const unitMatchers: Array<{ normUnit: string; option: ProductUnitOption }> = [];
     for (const option of effectiveUnits) {
@@ -810,11 +915,17 @@ function buildProductIndex(products: Product[]): IndexedProduct[] {
         unitMatchers.push({ normUnit: 'نصف', option });
       } else if (normUnit === 'ربع نفر') {
         unitMatchers.push({ normUnit: 'ربع', option });
+      } else if (normUnit === 'نص ذبيحه') {
+        unitMatchers.push({ normUnit: 'نصف ذبيحه', option });
+        unitMatchers.push({ normUnit: 'نص', option });
+        unitMatchers.push({ normUnit: 'نصف', option });
+      } else if (normUnit === 'ربع ذبيحه') {
+        unitMatchers.push({ normUnit: 'ربع', option });
       } else if (normUnit === 'ربع') {
         unitMatchers.push({ normUnit: 'ربع حبه', option });
       }
     }
-    // Sort longer unit phrases first so "نص نفر" matches before "نص"
+    // Sort longer unit phrases first so "نص ذبيحه" / "نص نفر" matches before "نص"
     unitMatchers.sort((a, b) => b.normUnit.length - a.normUnit.length);
 
     return {
@@ -864,9 +975,28 @@ function matchProductStrictDirect(
   return null;
 }
 
+function disambiguateCandidatesByUnitHint(
+  candidates: IndexedProduct[],
+  unitPhraseHint?: string
+): IndexedProduct | null {
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length <= 1 || !unitPhraseHint) return null;
+  const inferredProtein = inferUnitProteinHint(unitPhraseHint);
+  if (!inferredProtein) return null;
+  const filtered = candidates.filter((c) => {
+    if (c.domain.proteins.has(inferredProtein)) return true;
+    if (inferredProtein === 'meat' && (isCarcassProduct(c) || normalizeArabicText(c.product.unit) === 'نفر')) {
+      return true;
+    }
+    return false;
+  });
+  return filtered.length === 1 ? filtered[0] : null;
+}
+
 function matchProductFlexible(
   normQuery: string,
-  indexed: IndexedProduct[]
+  indexed: IndexedProduct[],
+  unitPhraseHint?: string
 ): { item: IndexedProduct; reason: Exclude<ExcelMatchReason, 'unit_variant' | 'manual'> } | null {
   if (!normQuery) return null;
 
@@ -895,10 +1025,14 @@ function matchProductFlexible(
     if (subsetCandidates.length === 1) {
       return { item: subsetCandidates[0], reason: 'subset' };
     }
+    const disambiguated = disambiguateCandidatesByUnitHint(subsetCandidates, unitPhraseHint);
+    if (disambiguated) {
+      return { item: disambiguated, reason: 'subset' };
+    }
   }
 
   // 4B. Safe 1-token or style-driven unique match (e.g. "شواية" -> "دجاج شواية",
-  // "بروست" -> "بروست دجاج", "شواية مع رز" -> "دجاج شواية" when only 1 shawayah product exists).
+  // "بروست" -> "بروست دجاج", "نفر مندي" -> "مندي لحم" when meat/chicken both exist).
   const coreQueryTokens = qNoAlTokens.filter((t) => !OPTIONAL_POS_FILLER_TOKENS.has(t));
   if (coreQueryTokens.length === 1) {
     const singleTok = coreQueryTokens[0];
@@ -910,6 +1044,10 @@ function matchProductFlexible(
       });
       if (styleOrTokenCandidates.length === 1) {
         return { item: styleOrTokenCandidates[0], reason: 'subset' };
+      }
+      const disambiguated = disambiguateCandidatesByUnitHint(styleOrTokenCandidates, unitPhraseHint);
+      if (disambiguated) {
+        return { item: disambiguated, reason: 'subset' };
       }
     }
   } else if (coreQueryTokens.length >= 2 && qSig.styles.size > 0) {
@@ -927,6 +1065,11 @@ function matchProductFlexible(
       const meaningfulOverlap = coreQueryTokens.some((t) => onlyItem.noAlTokens.includes(t));
       if (meaningfulOverlap) {
         return { item: onlyItem, reason: 'subset' };
+      }
+    } else if (matchingStyleProducts.length > 1) {
+      const disambiguated = disambiguateCandidatesByUnitHint(matchingStyleProducts, unitPhraseHint);
+      if (disambiguated) {
+        return { item: disambiguated, reason: 'subset' };
       }
     }
   }
@@ -1040,6 +1183,10 @@ export function guessUnitOptionForText(
         }
       }
       if (ok) {
+        const byName = units.find(
+          (u) => tokenizeNormalized(normalizeArabicText(u.name), true).join(' ') === def.phrase
+        );
+        if (byName) return byName;
         const match = units.find((u) => Math.abs(u.factor - def.factor) < 0.001);
         if (match) return match;
       }
@@ -1048,14 +1195,99 @@ export function guessUnitOptionForText(
   return units[0];
 }
 
-function resolveMatchedUnitOption(
+interface ResolvedUnitMatch {
+  matchedUnitOption?: ProductUnitOption;
+  unitFactor: number;
+  unitLabelOverride?: string;
+  isNafarToCarcass: boolean;
+}
+
+function resolveUnitForMatchedProduct(
   item: IndexedProduct,
   phrase: string,
-  factor: number
-): ProductUnitOption | undefined {
-  const byPhrase = item.unitMatchers.find((m) => m.normUnit === phrase)?.option;
-  if (byPhrase) return byPhrase;
-  return item.effectiveUnits.find((u) => Math.abs(u.factor - factor) < 0.001);
+  genericFactor: number
+): ResolvedUnitMatch {
+  const normPhrase = tokenizeNormalized(normalizeArabicText(phrase), true).join(' ');
+  const carcassProd = isCarcassProduct(item);
+  const nafarMult = getNafarPhraseMultiplier(normPhrase);
+
+  // 1. If product is carcass-based (ذبيحة) and Excel sold نفر / نفرين / نص نفر / ربع نفر:
+  //    Convert strictly using 16 نفر = 1 ذبيحة (4 أنفار = ربع ذبيحة = 0.25)
+  if (carcassProd && nafarMult !== null) {
+    const nafarOpt = item.unitMatchers.find((m) => m.normUnit === 'نفر')?.option;
+    const baseNafarFactor = nafarOpt ? nafarOpt.factor : DEFAULT_NAFAR_PER_CARCASS_FACTOR;
+    const exactPhraseOpt = item.unitMatchers.find((m) => m.normUnit === normPhrase)?.option;
+    return {
+      matchedUnitOption: exactPhraseOpt,
+      unitFactor: exactPhraseOpt ? exactPhraseOpt.factor : baseNafarFactor * nafarMult,
+      unitLabelOverride: exactPhraseOpt?.name || phrase,
+      isNafarToCarcass: true,
+    };
+  }
+
+  // 2. If product is نفر-based and Excel sold ذبيحة / نص ذبيحة / ربع ذبيحة (without explicit unit option):
+  //    Convert using 1 ذبيحة = 16 نفر
+  const baseUnitNorm = normalizeArabicText(item.product.unit);
+  const carcassMult = getCarcassPhraseMultiplier(normPhrase);
+  if (!carcassProd && baseUnitNorm === 'نفر' && carcassMult !== null) {
+    const exactPhraseOpt = item.unitMatchers.find((m) => m.normUnit === normPhrase)?.option;
+    if (exactPhraseOpt) {
+      return {
+        matchedUnitOption: exactPhraseOpt,
+        unitFactor: exactPhraseOpt.factor,
+        isNafarToCarcass: false,
+      };
+    }
+    return {
+      matchedUnitOption: undefined,
+      unitFactor: NAFAR_PER_CARCASS * carcassMult,
+      unitLabelOverride: phrase,
+      isNafarToCarcass: false,
+    };
+  }
+
+  // 3. Standard phrase/factor resolution (حبة/نص/ربع, ذبيحة/نص ذبيحة/ربع ذبيحة, نفر/نص نفر/ربع نفر)
+  const byPhrase = item.unitMatchers.find((m) => m.normUnit === normPhrase)?.option;
+  if (byPhrase) {
+    return {
+      matchedUnitOption: byPhrase,
+      unitFactor: byPhrase.factor,
+      isNafarToCarcass: false,
+    };
+  }
+
+  const byFactor = item.effectiveUnits.find((u) => Math.abs(u.factor - genericFactor) < 0.001);
+  return {
+    matchedUnitOption: byFactor,
+    unitFactor: byFactor ? byFactor.factor : genericFactor,
+    isNafarToCarcass: false,
+  };
+}
+
+function resolveUnitColumnForProduct(
+  item: IndexedProduct,
+  normUnitCol: string
+): ResolvedUnitMatch | null {
+  if (!normUnitCol) return null;
+  const tokens = tokenizeNormalized(normUnitCol, true);
+  if (tokens.length === 0) return null;
+
+  for (const def of GENERIC_UNIT_PHRASES) {
+    const len = def.tokens.length;
+    for (let i = 0; i <= tokens.length - len; i++) {
+      let ok = true;
+      for (let j = 0; j < len; j++) {
+        if (tokens[i + j] !== def.tokens[j]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        return resolveUnitForMatchedProduct(item, def.phrase, def.factor);
+      }
+    }
+  }
+  return null;
 }
 
 function matchExcelNameToProduct(
@@ -1067,6 +1299,8 @@ function matchExcelNameToProduct(
   reason: Exclude<ExcelMatchReason, 'manual'>;
   unitFactor: number;
   matchedUnitOption?: ProductUnitOption;
+  unitLabelOverride?: string;
+  isNafarToCarcass?: boolean;
 } | null {
   const normQuery = normalizeArabicText(rawExcelName);
   if (!normQuery) return null;
@@ -1074,19 +1308,19 @@ function matchExcelNameToProduct(
   const normUnitCol = normalizeArabicText(rawUnitCell);
 
   // 1. Strict direct match FIRST (exact / normalized / reordered only —
-  // never run subset/fuzzy before stripping "نص" or "ربع"!)
+  // never run subset/fuzzy before stripping "نص", "ربع", or "نفر"!)
   const strictDirect = matchProductStrictDirect(normQuery, indexed);
   if (strictDirect) {
-    if (normUnitCol) {
-      const colUnitMatch = guessUnitOptionForText(normUnitCol, strictDirect.item.effectiveUnits);
-      if (colUnitMatch && Math.abs(colUnitMatch.factor - 1) > 0.001) {
-        return {
-          item: strictDirect.item,
-          reason: 'unit_variant',
-          unitFactor: colUnitMatch.factor,
-          matchedUnitOption: colUnitMatch,
-        };
-      }
+    const colResolved = resolveUnitColumnForProduct(strictDirect.item, normUnitCol);
+    if (colResolved && (Math.abs(colResolved.unitFactor - 1) > 0.0001 || colResolved.isNafarToCarcass)) {
+      return {
+        item: strictDirect.item,
+        reason: 'unit_variant',
+        unitFactor: colResolved.unitFactor,
+        matchedUnitOption: colResolved.matchedUnitOption,
+        unitLabelOverride: colResolved.unitLabelOverride,
+        isNafarToCarcass: colResolved.isNafarToCarcass,
+      };
     }
     return {
       item: strictDirect.item,
@@ -1095,35 +1329,36 @@ function matchExcelNameToProduct(
     };
   }
 
-  // 2. Extract unit phrases from start, middle, OR end (e.g. "نص دجاج شوايه", "دجاج نص شوايه", "شوايه 1/4")
+  // 2. Extract unit phrases from start, middle, OR end (e.g. "نفر لحم مندي", "نص دجاج شوايه", "شوايه 1/4")
   const unitCandidates = extractUnitCandidates(normQuery, indexed);
   for (const cand of unitCandidates) {
-    const baseMatch = matchProductFlexible(cand.strippedQuery, indexed);
+    const baseMatch = matchProductFlexible(cand.strippedQuery, indexed, cand.phrase);
     if (baseMatch) {
-      const matchedOpt = resolveMatchedUnitOption(baseMatch.item, cand.phrase, cand.factor);
-      const factor = matchedOpt ? matchedOpt.factor : cand.factor;
+      const resolved = resolveUnitForMatchedProduct(baseMatch.item, cand.phrase, cand.factor);
       return {
         item: baseMatch.item,
         reason: 'unit_variant',
-        unitFactor: factor,
-        matchedUnitOption: matchedOpt,
+        unitFactor: resolved.unitFactor,
+        matchedUnitOption: resolved.matchedUnitOption,
+        unitLabelOverride: resolved.unitLabelOverride,
+        isNafarToCarcass: resolved.isNafarToCarcass,
       };
     }
   }
 
   // 3. Fallback to flexible subset / fuzzy match ONLY when no unresolved unit phrase interfered
-  const flexibleDirect = matchProductFlexible(normQuery, indexed);
+  const flexibleDirect = matchProductFlexible(normQuery, indexed, normUnitCol || undefined);
   if (flexibleDirect) {
-    if (normUnitCol) {
-      const colUnitMatch = guessUnitOptionForText(normUnitCol, flexibleDirect.item.effectiveUnits);
-      if (colUnitMatch && Math.abs(colUnitMatch.factor - 1) > 0.001) {
-        return {
-          item: flexibleDirect.item,
-          reason: 'unit_variant',
-          unitFactor: colUnitMatch.factor,
-          matchedUnitOption: colUnitMatch,
-        };
-      }
+    const colResolved = resolveUnitColumnForProduct(flexibleDirect.item, normUnitCol);
+    if (colResolved && (Math.abs(colResolved.unitFactor - 1) > 0.0001 || colResolved.isNafarToCarcass)) {
+      return {
+        item: flexibleDirect.item,
+        reason: 'unit_variant',
+        unitFactor: colResolved.unitFactor,
+        matchedUnitOption: colResolved.matchedUnitOption,
+        unitLabelOverride: colResolved.unitLabelOverride,
+        isNafarToCarcass: colResolved.isNafarToCarcass,
+      };
     }
     return {
       item: flexibleDirect.item,
@@ -1236,6 +1471,7 @@ export function analyzeExcelSheet(
       sourceRowNumbers: number[];
       sourceLines: MatchedSourceLine[];
       totalQty: number;
+      nafarConvertedBaseQty: number;
       explicitBreakdown: UnitBreakdown;
       hasExplicitUnitVariant: boolean;
       hasPlainBaseQty: boolean;
@@ -1320,6 +1556,7 @@ export function analyzeExcelSheet(
       const effectiveUnits = match.item.effectiveUnits;
       const addedBaseQty = roundQty3(parsedQty * match.unitFactor);
       const unitLabel =
+        match.unitLabelOverride ||
         match.matchedUnitOption?.name ||
         (match.unitFactor === 2
           ? `×2 (${effectiveUnits[0]?.name || prod.unit})`
@@ -1330,7 +1567,7 @@ export function analyzeExcelSheet(
         excelName: rawUnitCell ? `${rawName} [${rawUnitCell}]` : rawName,
         rawQty: roundQty3(parsedQty),
         unitLabel,
-        unitFactor: match.unitFactor,
+        unitFactor: roundQty3(match.unitFactor),
         baseEquivalent: addedBaseQty,
         matchReason: match.reason,
       };
@@ -1344,11 +1581,12 @@ export function analyzeExcelSheet(
           sourceRowNumbers: [],
           sourceLines: [],
           totalQty: 0,
+          nafarConvertedBaseQty: 0,
           explicitBreakdown: {},
           hasExplicitUnitVariant: false,
           hasPlainBaseQty: false,
           matchReason: match.reason,
-          matchedUnitLabel: match.matchedUnitOption?.name,
+          matchedUnitLabel: match.unitLabelOverride || match.matchedUnitOption?.name,
         };
         matchedByProductId.set(prod.id, existing);
       }
@@ -1358,7 +1596,11 @@ export function analyzeExcelSheet(
       existing.sourceLines.push(sourceLine);
       existing.totalQty = roundQty3(existing.totalQty + addedBaseQty);
 
-      if (match.matchedUnitOption) {
+      if (match.isNafarToCarcass) {
+        // Accumulate نفر-sold quantities so every 4 أنفار promote cleanly to ربع ذبيحة and 16 to ذبيحة
+        existing.hasExplicitUnitVariant = true;
+        existing.nafarConvertedBaseQty = roundQty3(existing.nafarConvertedBaseQty + addedBaseQty);
+      } else if (match.matchedUnitOption) {
         existing.hasExplicitUnitVariant = true;
         if (parsedQty > 0) {
           const uName = match.matchedUnitOption.name;
@@ -1404,6 +1646,14 @@ export function analyzeExcelSheet(
   }
 
   const matched: MatchedExcelItem[] = Array.from(matchedByProductId.values()).map((entry) => {
+    if (entry.nafarConvertedBaseQty > 0) {
+      const promotedCounts = decomposeTotalToUnitCounts(
+        entry.nafarConvertedBaseQty,
+        entry.effectiveUnits
+      );
+      addUnitCountsIntoBreakdown(entry.explicitBreakdown, promotedCounts);
+    }
+
     const useExplicit =
       entry.hasExplicitUnitVariant &&
       Object.keys(entry.explicitBreakdown).length > 0 &&

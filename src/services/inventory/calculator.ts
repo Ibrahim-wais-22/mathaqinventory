@@ -96,7 +96,7 @@ export function safeNum(val: unknown): number {
 }
 
 export function roundQty(val: number): number {
-  return Math.round(val * 1000) / 1000;
+  return Math.round(val * 10000) / 10000;
 }
 
 export function sanitizeId(raw: string): string {

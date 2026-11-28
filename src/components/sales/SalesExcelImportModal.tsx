@@ -10,13 +10,17 @@ import {
 } from 'lucide-react';
 import type { Product, ProductUnitOption, UnitBreakdown } from '../../types/inventory';
 import {
+  DEFAULT_CARCASS_UNITS,
   decomposeTotalToUnitCounts,
+  formatBreakdownText,
   getEffectiveProductUnits,
   roundQty3,
 } from '../../utils/productUnits';
 import {
   analyzeExcelSheet,
   guessUnitOptionForText,
+  isCarcassUnitName,
+  isMandiMeatProduct,
   type ExcelMatchReason,
   type MatchedSourceLine,
   type ParsedExcelWorkbook,
@@ -87,6 +91,7 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
   const [showIgnoredRows, setShowIgnoredRows] = useState(false);
   const [unitFilterTab, setUnitFilterTab] = useState<UnitFilterTab>('all');
   const [previewSearch, setPreviewSearch] = useState('');
+  const [convertMandiNafarToCarcass, setConvertMandiNafarToCarcass] = useState(true);
 
   const activeSheet = useMemo(
     () => workbook.sheets.find((s) => s.name === selectedSheetName) || workbook.sheets[0],
@@ -112,14 +117,23 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
       {
         product: Product;
         effectiveUnits: ProductUnitOption[];
+        displayUnits: ProductUnitOption[];
         hasMultiUnitSupport: boolean;
         qty: number;
+        displayUnitLabel: string;
         counts: Record<string, string>;
         breakdown?: UnitBreakdown;
+        displayBreakdown?: UnitBreakdown;
         excelNames: string[];
         sourceLines: MatchedSourceLine[];
         matchReason: ExcelMatchReason;
         isManualAddition: boolean;
+        isMandiMeat: boolean;
+        isCarcassCatalogUnit: boolean;
+        convertedFromNafar: boolean;
+        rawNafarEquivalent?: number;
+        carcassEquivalent?: number;
+        carcassBreakdown?: UnitBreakdown;
       }
     >();
 
@@ -127,14 +141,20 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
       mergedMap.set(item.product.id, {
         product: item.product,
         effectiveUnits: item.effectiveUnits,
-        hasMultiUnitSupport: item.hasMultiUnitSupport,
+        displayUnits: item.effectiveUnits,
+        hasMultiUnitSupport: item.effectiveUnits.length > 1,
         qty: item.extractedQty,
+        displayUnitLabel: item.product.unit,
         counts: { ...item.counts },
         breakdown: item.unitBreakdown ? { ...item.unitBreakdown } : undefined,
+        displayBreakdown: item.unitBreakdown ? { ...item.unitBreakdown } : undefined,
         excelNames: [...item.excelNames],
         sourceLines: [...item.sourceLines],
         matchReason: item.matchReason,
         isManualAddition: false,
+        isMandiMeat: isMandiMeatProduct(item.product),
+        isCarcassCatalogUnit: isCarcassUnitName(item.product.unit),
+        convertedFromNafar: false,
       });
     }
 
@@ -183,6 +203,7 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
         existing.qty = nextTotal;
         existing.counts = nextCounts;
         existing.breakdown = Object.keys(finalBreakdown).length > 0 ? finalBreakdown : undefined;
+        existing.displayBreakdown = existing.breakdown;
         existing.excelNames.push(unrec.excelName);
         existing.sourceLines.push(manualLine);
       } else {
@@ -203,15 +224,74 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
         mergedMap.set(prod.id, {
           product: prod,
           effectiveUnits: units,
+          displayUnits: units,
           hasMultiUnitSupport: units.length > 1,
           qty: addedBase,
+          displayUnitLabel: prod.unit,
           counts,
           breakdown: Object.keys(breakdown).length > 0 ? breakdown : undefined,
+          displayBreakdown: Object.keys(breakdown).length > 0 ? breakdown : undefined,
           excelNames: [unrec.excelName],
           sourceLines: [manualLine],
           matchReason: 'manual',
           isManualAddition: true,
+          isMandiMeat: isMandiMeatProduct(prod),
+          isCarcassCatalogUnit: isCarcassUnitName(prod.unit),
+          convertedFromNafar: false,
         });
+      }
+    }
+
+    // Apply Mandi lamb نفر -> ذبيحة separation & conversion (16 نفر = 1 ذبيحة، 4 أنفار = 0.25 ربع ذبيحة)
+    for (const entry of mergedMap.values()) {
+      if (!entry.isMandiMeat) continue;
+
+      if (entry.isCarcassCatalogUnit) {
+        const carcassCounts = decomposeTotalToUnitCounts(
+          entry.qty,
+          entry.effectiveUnits,
+          entry.breakdown
+        );
+        const carcassBd: UnitBreakdown = {};
+        for (const u of entry.effectiveUnits) {
+          const val = Number(carcassCounts[u.name] || 0);
+          if (val > 0) carcassBd[u.name] = roundQty3(val);
+        }
+        entry.rawNafarEquivalent = roundQty3(entry.qty * 16);
+        entry.carcassEquivalent = entry.qty;
+        entry.carcassBreakdown =
+          Object.keys(carcassBd).length > 0 ? carcassBd : entry.breakdown;
+        entry.convertedFromNafar = true;
+      } else {
+        const rawNafar = entry.qty;
+        const carcassQty = roundQty3(rawNafar / 16);
+        const carcassCounts = decomposeTotalToUnitCounts(carcassQty, DEFAULT_CARCASS_UNITS);
+        const carcassBd: UnitBreakdown = {};
+        for (const u of DEFAULT_CARCASS_UNITS) {
+          const val = Number(carcassCounts[u.name] || 0);
+          if (val > 0) carcassBd[u.name] = roundQty3(val);
+        }
+        entry.rawNafarEquivalent = rawNafar;
+        entry.carcassEquivalent = carcassQty;
+        entry.carcassBreakdown = Object.keys(carcassBd).length > 0 ? carcassBd : undefined;
+
+        if (convertMandiNafarToCarcass) {
+          entry.qty = carcassQty;
+          entry.displayUnits = DEFAULT_CARCASS_UNITS;
+          entry.displayUnitLabel = 'ذبيحة';
+          entry.displayBreakdown = entry.carcassBreakdown;
+          entry.hasMultiUnitSupport = true;
+          entry.convertedFromNafar = true;
+          // Keep saved counts aligned with the catalog product's units so SalesWorkspace totals stay exact
+          const catalogCounts = decomposeTotalToUnitCounts(carcassQty, entry.effectiveUnits);
+          const catalogBd: UnitBreakdown = {};
+          for (const u of entry.effectiveUnits) {
+            const val = Number(catalogCounts[u.name] || 0);
+            if (val > 0) catalogBd[u.name] = roundQty3(val);
+          }
+          entry.counts = catalogCounts;
+          entry.breakdown = Object.keys(catalogBd).length > 0 ? catalogBd : undefined;
+        }
       }
     }
 
@@ -221,7 +301,42 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
       }
       return a.product.name.localeCompare(b.product.name, 'ar');
     });
-  }, [analysis.matched, analysis.unrecognized, manualLinks, productById]);
+  }, [
+    analysis.matched,
+    analysis.unrecognized,
+    manualLinks,
+    productById,
+    convertMandiNafarToCarcass,
+  ]);
+
+  const mandiMeatRows = useMemo(
+    () => combinedPreview.filter((r) => r.isMandiMeat),
+    [combinedPreview]
+  );
+  const hasNonCarcassMandiRow = useMemo(
+    () => mandiMeatRows.some((r) => !r.isCarcassCatalogUnit),
+    [mandiMeatRows]
+  );
+  const mandiTotalsSummary = useMemo(() => {
+    if (mandiMeatRows.length === 0) return null;
+    const totalNafar = roundQty3(
+      mandiMeatRows.reduce((s, r) => s + (r.rawNafarEquivalent ?? r.qty * 16), 0)
+    );
+    const totalCarcass = roundQty3(
+      mandiMeatRows.reduce((s, r) => s + (r.carcassEquivalent ?? r.qty / 16), 0)
+    );
+    const breakdownCounts = decomposeTotalToUnitCounts(totalCarcass, DEFAULT_CARCASS_UNITS);
+    const bd: UnitBreakdown = {};
+    for (const u of DEFAULT_CARCASS_UNITS) {
+      const val = Number(breakdownCounts[u.name] || 0);
+      if (val > 0) bd[u.name] = roundQty3(val);
+    }
+    return {
+      totalNafar,
+      totalCarcass,
+      breakdownText: formatBreakdownText(bd, DEFAULT_CARCASS_UNITS),
+    };
+  }, [mandiMeatRows]);
 
   const multiUnitCount = useMemo(
     () => combinedPreview.filter((r) => r.hasMultiUnitSupport).length,
@@ -309,7 +424,7 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
     const existingVal = existingSalesMap[row.product.id];
     const hasExisting = existingVal !== undefined && existingVal !== '';
     const formulaLine = row.hasMultiUnitSupport
-      ? formatFormulaLine(row.effectiveUnits, row.breakdown)
+      ? formatFormulaLine(row.displayUnits, row.displayBreakdown)
       : '';
 
     return (
@@ -337,6 +452,11 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
             <span className="rounded-md bg-zinc-100 border border-zinc-200 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600">
               {MATCH_REASON_LABELS[row.matchReason]}
             </span>
+            {row.isMandiMeat && row.convertedFromNafar && (
+              <span className="rounded-md bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">
+                تحويل أنفار ← ذبيحة (÷16)
+              </span>
+            )}
           </div>
           {row.sourceLines.length > 0 && (
             <div className="mt-1 space-y-0.5 text-[11px] text-zinc-500">
@@ -361,8 +481,8 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
           {row.hasMultiUnitSupport ? (
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-1.5 tabular-nums">
-                {row.effectiveUnits.map((u) => {
-                  const val = row.breakdown?.[u.name] ?? 0;
+                {row.displayUnits.map((u) => {
+                  const val = row.displayBreakdown?.[u.name] ?? 0;
                   return (
                     <div
                       key={u.name}
@@ -391,8 +511,17 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
         <td className="px-3 py-2.5 align-top tabular-nums whitespace-nowrap">
           <div className="font-bold text-zinc-900 text-sm">
             {row.qty}{' '}
-            <span className="font-normal text-xs text-zinc-500">{row.product.unit}</span>
+            <span className="font-normal text-xs text-zinc-500">{row.displayUnitLabel}</span>
           </div>
+          {row.isMandiMeat &&
+            row.rawNafarEquivalent !== undefined &&
+            row.carcassEquivalent !== undefined && (
+              <div className="text-[11px] text-emerald-700 mt-0.5">
+                {row.convertedFromNafar
+                  ? `من ${row.rawNafarEquivalent} نفر`
+                  : `يعادل: ${row.carcassEquivalent} ذبيحة`}
+              </div>
+            )}
           {hasExisting && (
             <div className="text-[11px] text-amber-700 mt-0.5">
               الحالي: {existingVal}
@@ -581,7 +710,37 @@ export const SalesExcelImportModal: React.FC<SalesExcelImportModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-5">
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {mandiTotalsSummary && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="text-xs font-bold text-emerald-950">
+                  فرز لحم المندي وتحويل الأنفار إلى ذبيحة (كل 4 أنفار = ربع ذبيحة · كل 16 نفر = 1 ذبيحة)
+                </div>
+                <div className="text-xs text-emerald-900 tabular-nums">
+                  الإجمالي المفروز للحم المندي: <strong>{mandiTotalsSummary.totalNafar}</strong> نفر ←{' '}
+                  <strong>{mandiTotalsSummary.totalCarcass}</strong> ذبيحة
+                  {mandiTotalsSummary.breakdownText
+                    ? ` (${mandiTotalsSummary.breakdownText})`
+                    : ''}
+                  <span className="block text-[11px] text-emerald-800/90 mt-0.5">
+                    الدجاج المندي يُفرز ويُحسب بشكل مستقل تماماً (بالحبة / النص / الربع) ولا يختلط مع لحم المندي.
+                  </span>
+                </div>
+              </div>
+              {hasNonCarcassMandiRow && (
+                <label className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-950 cursor-pointer shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={convertMandiNafarToCarcass}
+                    onChange={(e) => setConvertMandiNafarToCarcass(e.target.checked)}
+                    className="h-4 w-4 accent-[#D91B23] cursor-pointer"
+                  />
+                  <span>اعتماد التحويل إلى ذبيحة عند الإدخال</span>
+                </label>
+              )}
+            </div>
+          )}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
             {/* Matched Products Table */}
             <div className="lg:col-span-8 border border-zinc-200 rounded-xl overflow-hidden bg-white">

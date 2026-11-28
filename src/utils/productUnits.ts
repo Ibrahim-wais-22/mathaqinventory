@@ -12,8 +12,15 @@ export const DEFAULT_MEAT_UNITS: ProductUnitOption[] = [
   { name: 'ربع نفر', factor: 0.25 },
 ];
 
+export const DEFAULT_CARCASS_UNITS: ProductUnitOption[] = [
+  { name: 'ذبيحة', factor: 1 },
+  { name: 'نص ذبيحة', factor: 0.5 },
+  { name: 'ربع ذبيحة', factor: 0.25 },
+  { name: 'نفر', factor: 0.0625 },
+];
+
 export function roundQty3(val: number): number {
-  return Math.round(val * 1000) / 1000;
+  return Math.round(val * 10000) / 10000;
 }
 
 export function roundFactor4(val: number): number {
@@ -27,6 +34,12 @@ export function buildHalvesAndQuartersPreset(baseUnit: string): ProductUnitOptio
   }
   if (clean === 'نفر') {
     return DEFAULT_MEAT_UNITS.map((u) => ({ ...u }));
+  }
+  if (clean === 'ذبيحة' || clean === 'ذبيحه') {
+    return DEFAULT_CARCASS_UNITS.map((u) => ({
+      ...u,
+      name: u.name === 'ذبيحة' ? clean : u.name,
+    }));
   }
   return [
     { name: clean, factor: 1 },
@@ -44,7 +57,9 @@ export function getDefaultUnitsForProduct(
     categoryId === 'cat_chicken' ||
     categoryId === 'cat_meats' ||
     cleanUnit === 'حبة' ||
-    cleanUnit === 'نفر'
+    cleanUnit === 'نفر' ||
+    cleanUnit === 'ذبيحة' ||
+    cleanUnit === 'ذبيحه'
   ) {
     return buildHalvesAndQuartersPreset(cleanUnit);
   }
